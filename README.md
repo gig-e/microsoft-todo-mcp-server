@@ -298,7 +298,7 @@ pnpm run typecheck    # TypeScript type checking
 
 ## MCP Tools
 
-The server provides 13 tools for comprehensive Microsoft To Do management:
+The server provides 18 tools for comprehensive Microsoft To Do and Planner management:
 
 ### Authentication
 
@@ -326,6 +326,15 @@ The server provides 13 tools for comprehensive Microsoft To Do management:
 - **`create-checklist-item`** - Add a new subtask to a task
 - **`update-checklist-item`** - Update subtask text or completion status
 - **`delete-checklist-item`** - Remove a specific subtask
+
+### Microsoft Planner
+
+Powers the "Assigned to me" view in the To Do app — a separate API from native To Do
+lists, covering tasks from Planner plans (e.g. project boards) you're assigned to. Uses
+the same `Tasks.Read`/`Tasks.ReadWrite` scopes already granted; no extra consent needed.
+
+- **`get-assigned-planner-tasks`** - Get Planner tasks assigned to you across all plans
+- **`get-planner-task-details`** - Get the description and checklist for a specific Planner task
 
 ## Architecture
 
