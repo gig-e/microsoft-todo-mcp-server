@@ -1762,6 +1762,144 @@ server.tool(
   },
 )
 
+// Unlike the To Do API, Planner requires an If-Match ETag on every write to prevent
+// clobbering concurrent edits (tasks often live on shared/team plans). We fetch the
+// current ETag immediately before each PATCH and retry once on a 412 conflict.
+async function updatePlannerTaskWithRetry(
+  taskId: string,
+  patchBody: Record<string, unknown>,
+  token: string,
+): Promise<PlannerTask | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const current = await makeGraphRequest<PlannerTask & { "@odata.etag"?: string }>(
+      `${MS_GRAPH_BASE}/planner/tasks/${taskId}`,
+      token,
+    )
+    const etag = current?.["@odata.etag"]
+    if (!etag) {
+      return null
+    }
+
+    const response = await fetch(`${MS_GRAPH_BASE}/planner/tasks/${taskId}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "If-Match": etag,
+      },
+      body: JSON.stringify(patchBody),
+    })
+
+    if (response.ok) {
+      // Planner's PATCH returns 204 No Content on success; refetch to confirm the result.
+      return await makeGraphRequest<PlannerTask>(`${MS_GRAPH_BASE}/planner/tasks/${taskId}`, token)
+    }
+
+    if (response.status !== 412) {
+      const errorText = await response.text()
+      console.error(`Planner task update failed: ${response.status} ${errorText}`)
+      return null
+    }
+
+    console.error("Planner task ETag conflict (412), retrying with a fresh ETag...")
+  }
+
+  return null
+}
+
+server.tool(
+  "update-planner-task",
+  "Update a Microsoft Planner task — progress, title, priority, or dates. Handles the ETag concurrency check Planner requires automatically. Use get-assigned-planner-tasks first to find the task ID.",
+  {
+    taskId: z.string().describe("ID of the Planner task to update"),
+    title: z.string().optional().describe("New title of the task"),
+    percentComplete: z
+      .number()
+      .min(0)
+      .max(100)
+      .optional()
+      .describe("Progress percentage: 0 = not started, 1-99 = in progress, 100 = completed"),
+    priority: z
+      .number()
+      .min(0)
+      .max(10)
+      .optional()
+      .describe("Priority 0-10: 0-1 Urgent, 2-4 Important, 5-6 Medium, 7-10 Low"),
+    dueDateTime: z
+      .string()
+      .optional()
+      .describe("New due date in ISO format (e.g., 2026-12-31T23:59:59Z), or empty string to remove"),
+    startDateTime: z
+      .string()
+      .optional()
+      .describe("New start date in ISO format (e.g., 2026-12-31T23:59:59Z), or empty string to remove"),
+  },
+  async ({ taskId, title, percentComplete, priority, dueDateTime, startDateTime }) => {
+    try {
+      const token = await getAccessToken()
+      if (!token) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Failed to authenticate with Microsoft API",
+            },
+          ],
+        }
+      }
+
+      const patchBody: Record<string, unknown> = {}
+      if (title !== undefined) patchBody.title = title
+      if (percentComplete !== undefined) patchBody.percentComplete = percentComplete
+      if (priority !== undefined) patchBody.priority = priority
+      if (dueDateTime !== undefined) patchBody.dueDateTime = dueDateTime === "" ? null : dueDateTime
+      if (startDateTime !== undefined) patchBody.startDateTime = startDateTime === "" ? null : startDateTime
+
+      if (Object.keys(patchBody).length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "No properties provided for update. Please specify at least one property to change.",
+            },
+          ],
+        }
+      }
+
+      const updated = await updatePlannerTaskWithRetry(taskId, patchBody, token)
+
+      if (!updated) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to update Planner task with ID: ${taskId}`,
+            },
+          ],
+        }
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Planner task updated successfully!\n${formatPlannerStatus(updated.percentComplete)} ${updated.title}\nPriority: ${updated.priority} (${formatPlannerPriority(updated.priority)})`,
+          },
+        ],
+      }
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error updating Planner task: ${error}`,
+          },
+        ],
+      }
+    }
+  },
+)
+
 // Bulk archive completed tasks
 server.tool(
   "archive-completed-tasks",
