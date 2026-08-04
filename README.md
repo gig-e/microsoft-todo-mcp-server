@@ -298,7 +298,7 @@ pnpm run typecheck    # TypeScript type checking
 
 ## MCP Tools
 
-The server provides 18 tools for comprehensive Microsoft To Do and Planner management:
+The server provides 19 tools for comprehensive Microsoft To Do and Planner management:
 
 ### Authentication
 
@@ -335,6 +335,7 @@ the same `Tasks.Read`/`Tasks.ReadWrite` scopes already granted; no extra consent
 
 - **`get-assigned-planner-tasks`** - Get Planner tasks assigned to you across all plans
 - **`get-planner-task-details`** - Get the description and checklist for a specific Planner task
+- **`update-planner-task`** - Update progress, title, priority, or dates on a Planner task (handles Planner's required ETag concurrency check automatically)
 
 ## Architecture
 
