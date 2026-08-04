@@ -17,7 +17,7 @@ A Model Context Protocol (MCP) server that enables AI assistants like Claude and
 
 ## Prerequisites
 
-- Node.js 16 or higher (tested with Node.js 18.x, 20.x, and 22.x)
+- Node.js 22.13 or higher
 - pnpm package manager
 - A Microsoft account (personal, work, or school)
 - Azure App Registration (see setup below)
@@ -54,6 +54,11 @@ pnpm run build
 
 ## Azure App Registration
 
+This app authenticates as a **public client** using the OAuth 2.0 authorization code
+flow with PKCE — there is no client secret.
+
+### Option A: Azure Portal
+
 1. Go to the [Azure Portal](https://portal.azure.com)
 2. Navigate to "App registrations" and create a new registration
 3. Name your application (e.g., "To Do MCP")
@@ -61,14 +66,92 @@ pnpm run build
    - **Accounts in this organizational directory only (Single tenant)** - For use within a single organization
    - **Accounts in any organizational directory (Any Azure AD directory - Multitenant)** - For use across multiple organizations
    - **Accounts in any organizational directory and personal Microsoft accounts** - For both work accounts and personal accounts
-5. Set the Redirect URI to `http://localhost:3000/callback`
-6. After creating the app, go to "Certificates & secrets" and create a new client secret
-7. Go to "API permissions" and add the following permissions:
+5. Under "Authentication", add a platform of type **"Mobile and desktop applications"** and add
+   `http://localhost` as a redirect URI. Do **not** use the "Web" platform type — that requires a
+   client secret, which this app does not use.
+6. Go to "API permissions" and add the following permissions:
    - Microsoft Graph > Delegated permissions:
      - Tasks.Read
+     - Tasks.Read.Shared
      - Tasks.ReadWrite
+     - Tasks.ReadWrite.Shared
      - User.Read
-8. Click "Grant admin consent" for these permissions
+7. Click "Grant admin consent" for these permissions (org tenants only — see note below)
+
+> Migrating an existing "Web" platform registration? Add a "Mobile and desktop applications"
+> platform alongside it (or switch to it) — a client secret is no longer read or required.
+
+### Option B: Azure CLI
+
+Requires `az login` first. This creates the same registration as Option A.
+
+```bash
+# 1. Create the app as a public client (no secret). Pick the sign-in audience that
+#    matches who should be able to use it:
+#      AzureADMyOrg                        -> single tenant  (TENANT_ID=<your-tenant-id>)
+#      AzureADMultipleOrgs                 -> multi-tenant   (TENANT_ID=organizations)
+#      AzureADandPersonalMicrosoftAccount  -> both           (TENANT_ID=common)
+#      PersonalMicrosoftAccount            -> personal only  (TENANT_ID=consumers)
+APP_ID=$(az ad app create \
+  --display-name "To Do MCP" \
+  --sign-in-audience AzureADandPersonalMicrosoftAccount \
+  --is-fallback-public-client true \
+  --public-client-redirect-uris "http://localhost" \
+  --query appId -o tsv)
+
+echo "CLIENT_ID=$APP_ID"
+
+# 2. Add the required Microsoft Graph delegated permissions.
+#    (Microsoft Graph's resource appId, 00000003-0000-0000-c000-000000000000, and the
+#    scope GUIDs below are fixed platform values — the same for every tenant/app.)
+az ad app permission add --id "$APP_ID" \
+  --api 00000003-0000-0000-c000-000000000000 \
+  --api-permissions \
+    e1fe6dd8-ba31-4d61-89e7-88639da4683d=Scope \
+    f45671fb-e0fe-4b4b-be20-3d3ce43f1bcb=Scope \
+    2219042f-cab5-40cc-b0d2-16b1540b4c5f=Scope \
+    88d21fd4-8e5a-4c32-b5e2-4a1c95f34f72=Scope \
+    c5ddf11b-c114-4886-8558-8a4e557cd52b=Scope
+# (User.Read, Tasks.Read, Tasks.ReadWrite, Tasks.Read.Shared, Tasks.ReadWrite.Shared, respectively)
+
+# 3. Grant admin consent — only applicable/needed for AzureADMyOrg / AzureADMultipleOrgs
+#    audiences, and only if you're a tenant admin. For AzureADandPersonalMicrosoftAccount
+#    or PersonalMicrosoftAccount audiences, personal-account users consent themselves the
+#    first time they sign in (during `pnpm run auth`) — skip this step for those.
+az ad app permission admin-consent --id "$APP_ID"
+```
+
+### Option C: Microsoft Graph API directly
+
+Equivalent to Option B, via a raw Graph call (e.g. through `az rest`, `curl` with a bearer
+token, or Graph Explorer) — useful if you're not using the Azure CLI:
+
+```bash
+az rest --method POST \
+  --uri https://graph.microsoft.com/v1.0/applications \
+  --body '{
+    "displayName": "To Do MCP",
+    "signInAudience": "AzureADandPersonalMicrosoftAccount",
+    "isFallbackPublicClient": true,
+    "publicClient": { "redirectUris": ["http://localhost"] },
+    "requiredResourceAccess": [
+      {
+        "resourceAppId": "00000003-0000-0000-c000-000000000000",
+        "resourceAccess": [
+          { "id": "e1fe6dd8-ba31-4d61-89e7-88639da4683d", "type": "Scope" },
+          { "id": "f45671fb-e0fe-4b4b-be20-3d3ce43f1bcb", "type": "Scope" },
+          { "id": "2219042f-cab5-40cc-b0d2-16b1540b4c5f", "type": "Scope" },
+          { "id": "88d21fd4-8e5a-4c32-b5e2-4a1c95f34f72", "type": "Scope" },
+          { "id": "c5ddf11b-c114-4886-8558-8a4e557cd52b", "type": "Scope" }
+        ]
+      }
+    ]
+  }'
+```
+
+This requires `Application.ReadWrite.All` (or equivalent) on whatever credential is
+calling Graph. Admin consent still needs a separate call/step as in Option B if the
+audience includes org accounts.
 
 ## Configuration
 
@@ -78,9 +161,7 @@ Create a `.env` file in the project root (required for authentication):
 
 ```env
 CLIENT_ID=your_client_id
-CLIENT_SECRET=your_client_secret
 TENANT_ID=your_tenant_setting
-REDIRECT_URI=http://localhost:3000/callback
 ```
 
 ### TENANT_ID Options
@@ -108,16 +189,24 @@ TENANT_ID=00000000-0000-0000-0000-000000000000
 
 ### Token Storage
 
-The server stores authentication tokens in `tokens.json` with automatic refresh 5 minutes before expiration. You can override the token file location:
+Authentication tokens are never written into this project directory (which matters if it's
+synced by OneDrive, Dropbox, etc.). Instead, the MSAL token cache is stored **encrypted at
+rest** in a per-user, per-machine location:
+
+- **Windows**: `%APPDATA%\microsoft-todo-mcp\token-cache.bin`
+- **macOS/Linux**: `~/.config/microsoft-todo-mcp/token-cache.bin`
+
+The encryption key is derived from a machine identifier, so the file is only usable on the
+machine that created it — copying it to another machine (e.g. via cloud sync) yields
+undecryptable bytes, not a portable credential. Refresh happens silently and automatically;
+there's nothing to configure. You can override the cache file location:
 
 ```bash
-# Using environment variable
-export MSTODO_TOKEN_FILE=/path/to/custom/tokens.json
-
-# Or pass tokens directly
-export MS_TODO_ACCESS_TOKEN=your_access_token
-export MS_TODO_REFRESH_TOKEN=your_refresh_token
+export MSTODO_TOKEN_FILE=/path/to/custom/token-cache.bin
 ```
+
+Because credentials aren't portable between machines, run `pnpm run auth` once on each
+machine you use this server from.
 
 ## Usage
 
@@ -136,7 +225,8 @@ pnpm run auth
 pnpm run auth
 ```
 
-This opens a browser window for Microsoft authentication and creates a `tokens.json` file.
+This opens a browser window for Microsoft authentication and stores your session in the
+encrypted per-machine token cache described above.
 
 #### Step 2: Create MCP Configuration
 
@@ -148,7 +238,9 @@ pnpm run create-config
 mstodo-config
 ```
 
-This creates an `mcp.json` file with your authentication tokens.
+This creates an `mcp.json` file. No tokens are embedded in it — the server reads its own
+encrypted per-machine token store automatically, so `pnpm run auth` must be run once on
+each machine you deploy this to.
 
 #### Step 3: Configure Your AI Assistant
 
@@ -166,14 +258,13 @@ Add to your configuration file:
     "microsoftTodo": {
       "command": "npx",
       "args": ["--yes", "microsoft-todo-mcp-server"],
-      "env": {
-        "MS_TODO_ACCESS_TOKEN": "your_access_token",
-        "MS_TODO_REFRESH_TOKEN": "your_refresh_token"
-      }
+      "env": {}
     }
   }
 }
 ```
+
+No tokens go in this config — run `pnpm run auth` once on this machine first.
 
 **For Cursor:**
 
@@ -195,8 +286,8 @@ pnpm run cli          # Run MCP server via CLI wrapper
 npx microsoft-todo-mcp-server  # Run globally installed version
 
 # Authentication & Configuration
-pnpm run auth         # Start OAuth authentication server
-pnpm run create-config # Generate mcp.json from tokens.json
+pnpm run auth         # Run interactive PKCE sign-in (opens browser)
+pnpm run create-config # Generate mcp.json (no tokens embedded)
 
 # Code Quality
 pnpm run format       # Format code with Prettier
@@ -241,15 +332,18 @@ The server provides 13 tools for comprehensive Microsoft To Do management:
 ### Project Structure
 
 - **MCP Server** (`src/todo-index.ts`) - Core server implementing the MCP protocol
-- **CLI Wrapper** (`src/cli.ts`) - Executable entry point with token management
-- **Auth Server** (`src/auth-server.ts`) - Express server for OAuth 2.0 flow
+- **CLI Wrapper** (`src/cli.ts`) - Executable entry point
+- **Auth Flow** (`src/auth-server.ts`) - One-shot interactive PKCE sign-in via MSAL Node
+- **MSAL Client** (`src/msal-client.ts`) - Shared `PublicClientApplication` factory and encrypted cache plugin
+- **Token Manager** (`src/token-manager.ts`) - Silent token acquisition against the encrypted cache
+- **Crypto Store** (`src/crypto-store.ts`) - AES-256-GCM encryption of the token cache, machine-bound key
 - **Config Generator** (`src/create-mcp-config.ts`) - Helper to create MCP configurations
 
 ### Technical Details
 
 - **Microsoft Graph API**: Uses v1.0 endpoints
-- **Authentication**: MSAL (Microsoft Authentication Library) with PKCE flow
-- **Token Management**: Automatic refresh 5 minutes before expiration
+- **Authentication**: MSAL Node `PublicClientApplication`, authorization code flow with PKCE (no client secret)
+- **Token Storage**: Encrypted at rest, machine-bound, stored outside the project directory; automatic silent refresh
 - **Build System**: ts-builds (tsdown) for fast TypeScript compilation
 - **Module System**: ESM (ECMAScript modules)
 
@@ -273,8 +367,9 @@ The server provides 13 tools for comprehensive Microsoft To Do management:
 
 **Token acquisition failures**
 
-- Verify `CLIENT_ID`, `CLIENT_SECRET`, and `TENANT_ID` in your `.env` file
-- Ensure redirect URI matches exactly: `http://localhost:3000/callback`
+- Verify `CLIENT_ID` and `TENANT_ID` in your `.env` file
+- Ensure the Azure app registration has a "Mobile and desktop applications" platform with
+  `http://localhost` as a redirect URI (not a "Web" platform — that expects a client secret)
 - Check Azure App permissions are granted with admin consent
 
 **Permission issues**
@@ -305,13 +400,10 @@ TENANT_ID=consumers  # Personal only
 ```bash
 # Using the MCP tool
 # In your AI assistant: "Check auth status"
-
-# Or examine tokens directly
-cat tokens.json | jq '.expiresAt'
-
-# Convert timestamp to readable date
-date -d @$(($(cat tokens.json | jq -r '.expiresAt') / 1000))
 ```
+
+The token cache is encrypted at rest and machine-bound, so it can't be inspected directly
+with `cat`/`jq` — use the `auth-status` MCP tool, or re-run `pnpm run auth` if in doubt.
 
 **Enable verbose logging:**
 

@@ -20,8 +20,8 @@ Build tooling is provided by **ts-builds** (3.x); package scripts delegate to th
 ### Authentication and Setup
 
 ```bash
-pnpm run auth        # Start OAuth authentication server (port 3000)
-pnpm run create-config # Generate mcp.json from tokens.json
+pnpm run auth        # Run interactive PKCE sign-in (opens browser, no server/port)
+pnpm run create-config # Generate mcp.json (no tokens embedded)
 ```
 
 ### Running the Server
@@ -47,13 +47,17 @@ Built with **ts-builds 3.2.0** (tsdown) on **pnpm 11**. Non-obvious, load-bearin
 This is a Model Context Protocol (MCP) server that enables AI assistants to interact with Microsoft To Do via the Microsoft Graph API. The codebase follows a modular architecture with four main components:
 
 1. **MCP Server** (`src/todo-index.ts`): Core server implementing the MCP protocol with 13 tools for Microsoft To Do operations
-2. **CLI Wrapper** (`src/cli.ts`): Executable entry point that handles token loading from environment or file
-3. **Auth Server** (`src/auth-server.js`): Express server implementing OAuth 2.0 flow with MSAL
-4. **Config Generator** (`src/create-mcp-config.ts`): Utility to create MCP configuration files
+2. **CLI Wrapper** (`src/cli.ts`): Executable entry point
+3. **Auth Flow** (`src/auth-server.ts`): One-shot interactive sign-in via MSAL Node `PublicClientApplication.acquireTokenInteractive()` — authorization code + PKCE, no client secret, no hand-rolled HTTP server (MSAL's own loopback server, bound to 127.0.0.1, handles the callback)
+4. **MSAL Client** (`src/msal-client.ts`): Shared `PublicClientApplication` factory, scopes, and the encrypted MSAL cache plugin
+5. **Token Manager** (`src/token-manager.ts`): Silent token acquisition (`acquireTokenSilent`) against the encrypted cache — no raw refresh token is ever held by app code
+6. **Crypto Store** (`src/crypto-store.ts`): AES-256-GCM encryption of the token cache with a key derived from a machine identifier (`node-machine-id`) — no native/compiled dependency
+7. **Config Generator** (`src/create-mcp-config.ts`): Utility to create MCP configuration files (no tokens embedded)
 
 ### Key Architectural Patterns
 
-- **Token Management**: Tokens are stored in `tokens.json` with automatic refresh 5 minutes before expiration
+- **Token Management**: MSAL's token cache is persisted encrypted at rest, outside the project directory, in a per-user app-data location (`%APPDATA%\microsoft-todo-mcp` / `~/.config/microsoft-todo-mcp`); automatic silent refresh via `acquireTokenSilent`
+- **Machine-bound encryption**: the cache decryption key is derived from a machine identifier, so the ciphertext is not portable to another machine (relevant since this directory may be cloud-synced) — but it is not equivalent to OS-keychain-backed storage (DPAPI/Keychain/libsecret), which would require a native dependency
 - **Multi-tenant Support**: Configurable for different Microsoft account types via TENANT_ID
 - **Error Handling**: Special handling for personal Microsoft accounts (MailboxNotEnabledForRESTAPI)
 - **Type Safety**: Strict TypeScript with Zod schemas for parameter validation
@@ -68,12 +72,12 @@ The server communicates with Microsoft Graph API v1.0:
 
 ### Environment Configuration
 
-- `MSTODO_TOKEN_FILE`: Custom path for tokens.json (defaults to ./tokens.json)
-- `.env` file required for authentication with CLIENT_ID, CLIENT_SECRET, TENANT_ID, REDIRECT_URI
+- `MSTODO_TOKEN_FILE`: Custom path for the encrypted token cache (defaults to the per-user app-data location; see above)
+- `.env` file required for authentication with CLIENT_ID, TENANT_ID (no CLIENT_SECRET — public client)
 
 ## Important Notes
 
 - Always run `pnpm run build` (or `pnpm run validate`) after modifying TypeScript files (ts-builds/tsdown bundling)
-- The auth server runs on port 3000 by default
-- Tokens are automatically refreshed using the refresh token when needed
+- `pnpm run auth` is a one-shot interactive sign-in (opens a browser, exits when done) — it is not a long-running server and does not bind any port itself; MSAL's internal loopback callback server binds to `127.0.0.1` only and exits after receiving the redirect
+- Tokens are refreshed automatically and silently via MSAL's cache; app code never sees a raw refresh token
 - Personal Microsoft accounts have limited API access compared to work/school accounts

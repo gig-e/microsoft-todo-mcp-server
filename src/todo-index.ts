@@ -1,17 +1,10 @@
+import "./load-env.js"
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
-import dotenv from "dotenv"
-import { existsSync, readFileSync, writeFileSync } from "fs"
-import { join } from "path"
 import { z } from "zod"
 
 import { tokenManager } from "./token-manager.js"
-
-// Load environment variables
-dotenv.config()
-
-// Log the current working directory
-console.error("Current working directory:", process.cwd())
 
 // Microsoft Graph API endpoints
 const MS_GRAPH_BASE = "https://graph.microsoft.com/v1.0"
@@ -123,13 +116,6 @@ async function getAccessToken(): Promise<string | null> {
     console.error("Error getting access token:", error)
     return null
   }
-}
-
-// Server configuration type
-interface ServerConfig {
-  accessToken?: string
-  refreshToken?: string
-  tokenFilePath?: string
 }
 
 // Function to check if the account is a personal Microsoft account
@@ -1901,11 +1887,8 @@ server.tool(
 )
 
 // Main function to start the server
-export async function startServer(config?: ServerConfig): Promise<void> {
+export async function startServer(): Promise<void> {
   try {
-    // Note: Token management is now handled by the TokenManager class
-    // Config options are kept for backward compatibility but not used
-
     // Check if using a personal Microsoft account and show warning if needed
     await isPersonalMicrosoftAccount()
 
