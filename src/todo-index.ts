@@ -268,6 +268,49 @@ interface ChecklistItem {
   createdDateTime?: string
 }
 
+interface PlannerTask {
+  id: string
+  planId: string
+  bucketId: string
+  title: string
+  percentComplete: number
+  priority: number
+  dueDateTime?: string
+  startDateTime?: string
+  completedDateTime?: string | null
+  hasDescription: boolean
+  checklistItemCount: number
+  activeChecklistItemCount: number
+}
+
+interface PlannerPlan {
+  id: string
+  title: string
+}
+
+interface PlannerChecklistItem {
+  title: string
+  isChecked: boolean
+}
+
+interface PlannerTaskDetails {
+  description?: string
+  checklist?: Record<string, PlannerChecklistItem>
+}
+
+function formatPlannerPriority(priority: number): string {
+  if (priority <= 1) return "Urgent"
+  if (priority <= 4) return "Important"
+  if (priority <= 6) return "Medium"
+  return "Low"
+}
+
+function formatPlannerStatus(percentComplete: number): string {
+  if (percentComplete >= 100) return "✓"
+  if (percentComplete > 0) return "◐"
+  return "○"
+}
+
 // Register tools
 server.tool(
   "get-task-lists",
@@ -1556,6 +1599,162 @@ server.tool(
           {
             type: "text",
             text: `Error deleting checklist item: ${error}`,
+          },
+        ],
+      }
+    }
+  },
+)
+
+// Microsoft Planner — powers the "Assigned to me" view in the To Do app, which draws
+// from Planner plans (e.g. a project's Planner board), not the native To Do lists above.
+server.tool(
+  "get-assigned-planner-tasks",
+  "Get Microsoft Planner tasks assigned to you across all plans (e.g. project boards). This is what powers the 'Assigned to me' view in the Microsoft To Do app — distinct from your native To Do lists.",
+  {},
+  async () => {
+    try {
+      const token = await getAccessToken()
+      if (!token) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Failed to authenticate with Microsoft API",
+            },
+          ],
+        }
+      }
+
+      const response = await makeGraphRequest<{ value: PlannerTask[] }>(`${MS_GRAPH_BASE}/me/planner/tasks`, token)
+
+      if (!response) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Failed to retrieve Planner tasks",
+            },
+          ],
+        }
+      }
+
+      const tasks = response.value || []
+      if (tasks.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "No Planner tasks assigned to you.",
+            },
+          ],
+        }
+      }
+
+      // Plan titles aren't included on the task objects — resolve each unique plan once
+      const uniquePlanIds = [...new Set(tasks.map((t) => t.planId))]
+      const plans = await Promise.all(
+        uniquePlanIds.map((planId) => makeGraphRequest<PlannerPlan>(`${MS_GRAPH_BASE}/planner/plans/${planId}`, token)),
+      )
+      const planNames = new Map<string, string>()
+      uniquePlanIds.forEach((planId, i) => planNames.set(planId, plans[i]?.title || planId))
+
+      const formattedTasks = tasks.map((task) => {
+        let taskInfo = `${formatPlannerStatus(task.percentComplete)} ${task.title}`
+        taskInfo += `\nPlan: ${planNames.get(task.planId)}`
+        if (task.dueDateTime) {
+          taskInfo += `\nDue: ${new Date(task.dueDateTime).toLocaleDateString()}`
+        }
+        taskInfo += `\nPriority: ${task.priority} (${formatPlannerPriority(task.priority)})`
+        if (task.checklistItemCount > 0) {
+          taskInfo += `\nChecklist: ${task.activeChecklistItemCount}/${task.checklistItemCount} remaining`
+        }
+        taskInfo += `\nID: ${task.id}`
+        return `${taskInfo}\n---`
+      })
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Planner tasks assigned to you:\n\n${formattedTasks.join("\n")}`,
+          },
+        ],
+      }
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching Planner tasks: ${error}`,
+          },
+        ],
+      }
+    }
+  },
+)
+
+server.tool(
+  "get-planner-task-details",
+  "Get the full description and checklist for a specific Microsoft Planner task. Use get-assigned-planner-tasks first to find the task ID.",
+  {
+    taskId: z.string().describe("ID of the Planner task"),
+  },
+  async ({ taskId }) => {
+    try {
+      const token = await getAccessToken()
+      if (!token) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Failed to authenticate with Microsoft API",
+            },
+          ],
+        }
+      }
+
+      const [task, details] = await Promise.all([
+        makeGraphRequest<PlannerTask>(`${MS_GRAPH_BASE}/planner/tasks/${taskId}`, token),
+        makeGraphRequest<PlannerTaskDetails>(`${MS_GRAPH_BASE}/planner/tasks/${taskId}/details`, token),
+      ])
+
+      if (!task) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to retrieve Planner task with ID: ${taskId}`,
+            },
+          ],
+        }
+      }
+
+      let output = `${formatPlannerStatus(task.percentComplete)} ${task.title}\n`
+      output += `Priority: ${task.priority} (${formatPlannerPriority(task.priority)})\n`
+      if (task.dueDateTime) {
+        output += `Due: ${new Date(task.dueDateTime).toLocaleDateString()}\n`
+      }
+
+      if (details?.description) {
+        output += `\nDescription:\n${details.description}\n`
+      }
+
+      const checklistEntries = Object.values(details?.checklist || {})
+      if (checklistEntries.length > 0) {
+        output += `\nChecklist:\n`
+        checklistEntries.forEach((item) => {
+          output += `${item.isChecked ? "✓" : "○"} ${item.title}\n`
+        })
+      }
+
+      return { content: [{ type: "text", text: output }] }
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching Planner task details: ${error}`,
           },
         ],
       }
