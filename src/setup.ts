@@ -6,6 +6,7 @@ import { homedir } from "os"
 import { join } from "path"
 import readline from "readline"
 
+import { type AccessMode, DEFAULT_ACCESS_MODE, describeAccessMode, parseAccessMode } from "./access-mode.js"
 import { getCacheFilePath } from "./msal-client.js"
 
 const rl = readline.createInterface({
@@ -15,6 +16,31 @@ const rl = readline.createInterface({
 
 const question = (query: string): Promise<string> => {
   return new Promise((resolve) => rl.question(query, resolve))
+}
+
+const ACCESS_MODE_CHOICES: Record<string, AccessMode> = { "1": "read", "2": "write", "3": "full" }
+
+async function askAccessMode(): Promise<AccessMode> {
+  console.log("\n🔒 How much control should the assistant have?")
+  console.log("  1) read  - read-only; browse lists and tasks, change nothing")
+  console.log("  2) write - read plus create and update, but never delete")
+  console.log("  3) full  - everything, including delete and archive")
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const answer = (await question("Choose 1-3 (press Enter for full): ")).trim().toLowerCase()
+    if (answer === "") return DEFAULT_ACCESS_MODE
+    if (ACCESS_MODE_CHOICES[answer]) return ACCESS_MODE_CHOICES[answer]
+
+    try {
+      // Also accept the mode spelled out, e.g. "read-only".
+      return parseAccessMode(answer)
+    } catch {
+      console.log("Please enter 1, 2 or 3.")
+    }
+  }
+
+  console.log(`Falling back to '${DEFAULT_ACCESS_MODE}'. You can change MSTODO_ACCESS_MODE in the config later.`)
+  return DEFAULT_ACCESS_MODE
 }
 
 async function setup() {
@@ -57,6 +83,9 @@ TENANT_ID=${tenantId}
     console.log("✅ Created .env file")
   }
 
+  // Asked before the browser opens so every prompt happens up front.
+  const accessMode = await askAccessMode()
+
   console.log("\n🔐 Starting authentication flow...")
   console.log("A browser window will open. Please sign in with your Microsoft account.\n")
 
@@ -71,7 +100,7 @@ TENANT_ID=${tenantId}
       console.log("\n✅ Authentication successful!")
       console.log(`📁 Session stored securely at: ${tokenPath}`)
 
-      await updateClaudeConfig()
+      await updateClaudeConfig(accessMode)
 
       console.log("\n🎉 Setup complete! Microsoft To Do MCP is ready to use.")
       console.log("Restart Claude Desktop to activate the integration.")
@@ -83,7 +112,14 @@ TENANT_ID=${tenantId}
   })
 }
 
-async function updateClaudeConfig() {
+async function updateClaudeConfig(accessMode: AccessMode) {
+  const serverEntry = {
+    command: "npx",
+    args: ["microsoft-todo-mcp-server"],
+    // No tokens here — the server reads its own encrypted, per-machine store.
+    env: { MSTODO_ACCESS_MODE: accessMode },
+  }
+
   const claudeConfigPath =
     process.platform === "win32"
       ? join(process.env.APPDATA || "", "Claude", "claude_desktop_config.json")
@@ -93,19 +129,7 @@ async function updateClaudeConfig() {
 
   if (!existsSync(claudeConfigPath)) {
     console.log("\n⚠️  Claude config not found. Add this to your Claude desktop config manually:")
-    console.log(
-      JSON.stringify(
-        {
-          "microsoft-todo": {
-            command: "npx",
-            args: ["microsoft-todo-mcp-server"],
-            env: {},
-          },
-        },
-        null,
-        2,
-      ),
-    )
+    console.log(JSON.stringify({ "microsoft-todo": serverEntry }, null, 2))
     return
   }
 
@@ -117,14 +141,11 @@ async function updateClaudeConfig() {
       config.mcpServers = {}
     }
 
-    config.mcpServers["microsoft-todo"] = {
-      command: "npx",
-      args: ["microsoft-todo-mcp-server"],
-      env: {}, // No need for tokens in env anymore!
-    }
+    config.mcpServers["microsoft-todo"] = serverEntry
 
     writeFileSync(claudeConfigPath, JSON.stringify(config, null, 2))
     console.log("\n✅ Updated Claude Desktop configuration")
+    console.log(`   Access mode: ${describeAccessMode(accessMode)}`)
   } catch (error) {
     console.error("\n⚠️  Could not update Claude config automatically:", error)
   }

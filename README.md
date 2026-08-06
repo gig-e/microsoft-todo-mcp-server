@@ -7,7 +7,8 @@ A Model Context Protocol (MCP) server that enables AI assistants like Claude and
 
 ## Features
 
-- **15 MCP Tools**: Complete task management functionality including lists, tasks, checklist items, and organization features
+- **21 MCP Tools**: Complete task management functionality including lists, tasks, checklist items, cross-list search, and organization features
+- **Configurable Access Level**: Expose the server as read-only, read/write, or full control — see [Access Modes](#access-modes)
 - **Seamless Authentication**: Automatic token refresh with zero manual intervention
 - **OAuth 2.0 Authentication**: Secure authentication with automatic token refresh
 - **Microsoft Graph API Integration**: Direct integration with Microsoft's official API
@@ -187,6 +188,48 @@ TENANT_ID=common
 TENANT_ID=00000000-0000-0000-0000-000000000000
 ```
 
+### Access Modes
+
+Authentication grants this server your full `Tasks.ReadWrite` scope, so by default an
+assistant can delete lists and tasks as easily as it can read them. `MSTODO_ACCESS_MODE`
+narrows the tool surface:
+
+| Mode    | Tools | What the assistant can do                                                    |
+| ------- | ----- | ---------------------------------------------------------------------------- |
+| `read`  | 10    | Query lists, tasks, checklists, search and agenda. Changes nothing.          |
+| `write` | 17    | Everything in `read`, plus create and update. Cannot delete.                 |
+| `full`  | 21    | Everything, including `delete-*` and `archive-completed-tasks`. **Default.** |
+
+Set it in the MCP server config alongside the command:
+
+```json
+{
+  "mcpServers": {
+    "microsoftTodo": {
+      "command": "npx",
+      "args": ["--yes", "microsoft-todo-mcp-server"],
+      "env": { "MSTODO_ACCESS_MODE": "write" }
+    }
+  }
+}
+```
+
+Withheld tools are never registered, so they don't appear in `tools/list` at all — the
+assistant can't attempt them and be refused, it simply doesn't know they exist. Run
+`auth-status` to see the active mode and exactly which tools are being withheld.
+
+Notes:
+
+- Unset means `full`, so upgrading an existing install doesn't silently lose tools.
+- An unrecognised value is fatal at startup rather than falling back — a typo like
+  `MSTODO_ACCESS_MODE=raed` must not quietly grant full control.
+- `archive-completed-tasks` counts as destructive: it deletes from the source list after
+  copying, so it needs `full` even though it's framed as a move.
+- Aliases are accepted: `read-only` → `read`, `read-write`/`update` → `write`, `all` → `full`.
+- This is a guard rail against accidents, not a security boundary — the token in the
+  encrypted cache still carries full scope, and anything that can edit the MCP config can
+  change the mode.
+
 ### Token Storage
 
 Authentication tokens are never written into this project directory (which matters if it's
@@ -236,11 +279,14 @@ pnpm run create-config
 
 # Or use the global helper (if installed globally)
 mstodo-config
+
+# Optionally pick an output path and access mode (see Access Modes above)
+mstodo-config ./mcp.json write
 ```
 
 This creates an `mcp.json` file. No tokens are embedded in it — the server reads its own
 encrypted per-machine token store automatically, so `pnpm run auth` must be run once on
-each machine you deploy this to.
+each machine you deploy this to. `mstodo-setup` asks for the access mode interactively.
 
 #### Step 3: Configure Your AI Assistant
 
@@ -258,13 +304,14 @@ Add to your configuration file:
     "microsoftTodo": {
       "command": "npx",
       "args": ["--yes", "microsoft-todo-mcp-server"],
-      "env": {}
+      "env": { "MSTODO_ACCESS_MODE": "full" }
     }
   }
 }
 ```
 
-No tokens go in this config — run `pnpm run auth` once on this machine first.
+No tokens go in this config — run `pnpm run auth` once on this machine first. Change
+`MSTODO_ACCESS_MODE` to `read` or `write` to narrow what the assistant can do.
 
 **For Cursor:**
 
@@ -298,34 +345,58 @@ pnpm run typecheck    # TypeScript type checking
 
 ## MCP Tools
 
-The server provides 19 tools for comprehensive Microsoft To Do and Planner management:
+The server provides 21 tools for comprehensive Microsoft To Do and Planner management. The
+badge after each tool is the [access mode](#access-modes) it requires: 🟢 `read`,
+🟡 `write`, 🔴 `full`.
 
 ### Authentication
 
-- **`auth-status`** - Check authentication status, token expiration, and account type
+- **`auth-status`** 🟢 - Check authentication status, token expiration, account type, and the active access mode
 
 ### Task Lists (Top-level Containers)
 
-- **`get-task-lists`** - Retrieve all task lists with metadata (default, shared, etc.)
-- **`create-task-list`** - Create a new task list
-- **`update-task-list`** - Rename an existing task list
-- **`delete-task-list`** - Delete a task list and all its contents
+- **`get-task-lists`** 🟢 - Retrieve all task lists with metadata (default, shared, etc.)
+- **`get-task-lists-organized`** 🟢 - Group lists into folders inferred from naming patterns, emoji prefixes, and sharing status
+- **`create-task-list`** 🟡 - Create a new task list
+- **`update-task-list`** 🟡 - Rename an existing task list
+- **`delete-task-list`** 🔴 - Delete a task list and all its contents
 
 ### Tasks (Main Todo Items)
 
-- **`get-tasks`** - Get tasks from a list with filtering, sorting, and pagination
+- **`get-tasks`** 🟢 - Get tasks from a list with filtering, sorting, and pagination
   - Supports OData query parameters: `$filter`, `$select`, `$orderby`, `$top`, `$skip`, `$count`
-- **`create-task`** - Create a new task with full property support
+- **`create-task`** 🟡 - Create a new task with full property support
   - Title, description, due date, start date, importance, reminders, status, categories
-- **`update-task`** - Update any task properties
-- **`delete-task`** - Delete a task and all its checklist items
+- **`update-task`** 🟡 - Update any task properties
+- **`delete-task`** 🔴 - Delete a task and all its checklist items
+
+### Cross-List Views
+
+Graph scopes every task query to a single list, so these two fan out across your lists and
+combine the results — no `listId` needed. Both accept list IDs _or_ list names in
+`listIds`, and both report any lists that couldn't be read so an empty result is never
+mistaken for "nothing there".
+
+- **`search-tasks`** 🟢 - Find tasks by text across every list at once
+  - Matches title and categories (and descriptions with `searchBody`), case-insensitively
+  - All whitespace-separated terms must appear, in any order: `tax invoice` finds "Invoice for tax return"
+  - Filters: `importance`, `dueBefore`/`dueAfter`, `includeCompleted`, `limit`
+- **`get-agenda`** 🟢 - Roll everything due into overdue / today / tomorrow / upcoming sections
+  - `days` sets how far ahead to look (default 7); overdue is never windowed out
+  - `timeZone` (IANA name) decides which day is "today", defaulting to `MSTODO_TIMEZONE` then the server's local zone
+  - Due dates are read as the calendar day To Do stored, not converted from the instant — so a task due Aug 5 doesn't show as Aug 4 in a negative-offset zone
 
 ### Checklist Items (Subtasks)
 
-- **`get-checklist-items`** - Get subtasks for a specific task
-- **`create-checklist-item`** - Add a new subtask to a task
-- **`update-checklist-item`** - Update subtask text or completion status
-- **`delete-checklist-item`** - Remove a specific subtask
+- **`get-checklist-items`** 🟢 - Get subtasks for a specific task
+- **`create-checklist-item`** 🟡 - Add a new subtask to a task
+- **`update-checklist-item`** 🟡 - Update subtask text or completion status
+- **`delete-checklist-item`** 🔴 - Remove a specific subtask
+
+### Maintenance
+
+- **`archive-completed-tasks`** 🔴 - Move completed tasks older than N days into an archive list (copies, then deletes from the source — supports `dryRun`)
+- **`test-graph-api-exploration`** 🟢 - Probe Graph for undocumented folder/grouping properties
 
 ### Microsoft Planner
 
@@ -333,15 +404,17 @@ Powers the "Assigned to me" view in the To Do app — a separate API from native
 lists, covering tasks from Planner plans (e.g. project boards) you're assigned to. Uses
 the same `Tasks.Read`/`Tasks.ReadWrite` scopes already granted; no extra consent needed.
 
-- **`get-assigned-planner-tasks`** - Get Planner tasks assigned to you across all plans
-- **`get-planner-task-details`** - Get the description and checklist for a specific Planner task
-- **`update-planner-task`** - Update progress, title, priority, or dates on a Planner task (handles Planner's required ETag concurrency check automatically)
+- **`get-assigned-planner-tasks`** 🟢 - Get Planner tasks assigned to you across all plans
+- **`get-planner-task-details`** 🟢 - Get the description and checklist for a specific Planner task
+- **`update-planner-task`** 🟡 - Update progress, title, priority, or dates on a Planner task (handles Planner's required ETag concurrency check automatically)
 
 ## Architecture
 
 ### Project Structure
 
 - **MCP Server** (`src/todo-index.ts`) - Core server implementing the MCP protocol
+- **Access Modes** (`src/access-mode.ts`) - Parses `MSTODO_ACCESS_MODE` and decides which tools get registered
+- **Cross-List Helpers** (`src/agenda.ts`) - Due-date bucketing, query matching, and the fan-out concurrency cap
 - **CLI Wrapper** (`src/cli.ts`) - Executable entry point
 - **Auth Flow** (`src/auth-server.ts`) - One-shot interactive PKCE sign-in via MSAL Node
 - **MSAL Client** (`src/msal-client.ts`) - Shared `PublicClientApplication` factory and encrypted cache plugin
@@ -351,7 +424,7 @@ the same `Tasks.Read`/`Tasks.ReadWrite` scopes already granted; no extra consent
 
 ### Technical Details
 
-- **Microsoft Graph API**: Uses v1.0 endpoints
+- **Microsoft Graph API**: Uses v1.0 endpoints, with bounded-concurrency fan-out and Retry-After-aware retries on 429/503 throttling
 - **Authentication**: MSAL Node `PublicClientApplication`, authorization code flow with PKCE (no client secret)
 - **Token Storage**: Encrypted at rest, machine-bound, stored outside the project directory; automatic silent refresh
 - **Build System**: ts-builds (tsdown) for fast TypeScript compilation

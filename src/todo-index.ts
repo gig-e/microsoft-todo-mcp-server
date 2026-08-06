@@ -1,9 +1,21 @@
 import "./load-env.js"
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
+import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
-import { z } from "zod"
+import { z, type ZodRawShape } from "zod"
 
+import { type AccessMode, describeAccessMode, isToolAllowed, parseAccessMode, type ToolAccess } from "./access-mode.js"
+import {
+  type AgendaBucket,
+  type AgendaTask,
+  bucketForTask,
+  compareTasksByDue,
+  dayKeyInZone,
+  dueDayKey,
+  isValidTimeZone,
+  mapWithConcurrency,
+  matchesQuery,
+} from "./agenda.js"
 import { tokenManager } from "./token-manager.js"
 
 // Microsoft Graph API endpoints
@@ -15,6 +27,59 @@ const server = new McpServer({
   name: "mstodo",
   version: "1.0.0",
 })
+
+// A bad MSTODO_ACCESS_MODE is fatal by design — see access-mode.ts. Exit with just the
+// message rather than a stack trace, since MCP clients surface stderr to the user raw.
+const accessMode: AccessMode = ((): AccessMode => {
+  try {
+    return parseAccessMode(process.env.MSTODO_ACCESS_MODE)
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exit(1)
+  }
+})()
+
+const withheldTools: string[] = []
+
+/**
+ * Register a tool only if the configured access mode permits it. Withheld tools never
+ * reach tools/list, so an assistant in read mode can't call them and be refused — from
+ * its point of view they don't exist.
+ */
+function registerTool<Args extends ZodRawShape>(
+  access: ToolAccess,
+  name: string,
+  description: string,
+  paramsSchema: Args,
+  cb: ToolCallback<Args>,
+): void {
+  if (!isToolAllowed(access, accessMode)) {
+    withheldTools.push(`${name} (${access})`)
+    return
+  }
+
+  server.tool(name, description, paramsSchema, cb)
+}
+
+// Graph throttles bursts with 429 and sheds load with 503, asking callers to honour
+// Retry-After. Querying every list at once (search-tasks, get-agenda) hits this routinely,
+// and an unretried throttle looks like an empty list rather than an error.
+const MAX_THROTTLE_RETRIES = 3
+const MAX_RETRY_DELAY_MS = 10_000
+
+function isThrottled(status: number): boolean {
+  return status === 429 || status === 503
+}
+
+function retryDelayMs(response: Response, attempt: number): number {
+  const retryAfter = Number(response.headers.get("Retry-After"))
+  // Fall back to exponential backoff when the header is absent or non-numeric (it may
+  // also be an HTTP date, which we don't try to parse).
+  const suggested = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 2 ** attempt * 500
+  return Math.min(suggested, MAX_RETRY_DELAY_MS)
+}
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // Helper function for making Microsoft Graph API requests
 async function makeGraphRequest<T>(url: string, token: string, method = "GET", body?: any): Promise<T | null> {
@@ -57,6 +122,13 @@ async function makeGraphRequest<T>(url: string, token: string, method = "GET", b
         headers.Authorization = `Bearer ${newToken}`
         response = await fetch(url, { ...options, headers })
       }
+    }
+
+    for (let attempt = 0; isThrottled(response.status) && attempt < MAX_THROTTLE_RETRIES; attempt++) {
+      const wait = retryDelayMs(response, attempt)
+      console.error(`Throttled with ${response.status}; retrying in ${wait}ms (attempt ${attempt + 1})`)
+      await delay(wait)
+      response = await fetch(url, { ...options, headers })
     }
 
     if (!response.ok) {
@@ -174,7 +246,8 @@ but API access is restricted for personal accounts.
 }
 
 // Server tool to check authentication status
-server.tool(
+registerTool(
+  "read",
   "auth-status",
   "Check if you're authenticated with Microsoft Graph API. Shows current token status and expiration time, and indicates if the token needs to be refreshed.",
   {},
@@ -195,6 +268,14 @@ server.tool(
     const isExpired = Date.now() > tokens.expiresAt
     const expiryTime = new Date(tokens.expiresAt).toLocaleString()
 
+    // Surface the access mode here too: if a tool the user expects is missing from the
+    // list, this is where they'll look to find out why.
+    let modeMessage = `\n\nAccess mode: ${describeAccessMode(accessMode)}.`
+    if (withheldTools.length > 0) {
+      modeMessage += `\nWithheld by this mode (${withheldTools.length}): ${withheldTools.join(", ")}.`
+      modeMessage += `\nSet MSTODO_ACCESS_MODE=full in the MCP server config to enable them.`
+    }
+
     // Check if it's a personal account
     const isPersonal = await isPersonalMicrosoftAccount()
     let accountMessage = ""
@@ -212,7 +293,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Authentication expired at ${expiryTime}. Will attempt to refresh when you call any API.${accountMessage}`,
+            text: `Authentication expired at ${expiryTime}. Will attempt to refresh when you call any API.${accountMessage}${modeMessage}`,
           },
         ],
       }
@@ -221,7 +302,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Authenticated. Token expires at ${expiryTime}.${accountMessage}`,
+            text: `Authenticated. Token expires at ${expiryTime}.${accountMessage}${modeMessage}`,
           },
         ],
       }
@@ -312,7 +393,8 @@ function formatPlannerStatus(percentComplete: number): string {
 }
 
 // Register tools
-server.tool(
+registerTool(
+  "read",
   "get-task-lists",
   "Get all Microsoft Todo task lists (the top-level containers that organize your tasks). Shows list names, IDs, and indicates default or shared lists.",
   {},
@@ -397,7 +479,8 @@ server.tool(
 )
 
 // Enhanced organized view of task lists
-server.tool(
+registerTool(
+  "read",
   "get-task-lists-organized",
   "Get all task lists organized into logical folders/categories based on naming patterns, emoji prefixes, and sharing status. Provides a hierarchical view similar to folder organization.",
   {
@@ -651,7 +734,8 @@ server.tool(
   },
 )
 
-server.tool(
+registerTool(
+  "write",
   "create-task-list",
   "Create a new task list (top-level container) in Microsoft Todo to help organize your tasks into categories or projects.",
   {
@@ -711,7 +795,8 @@ server.tool(
   },
 )
 
-server.tool(
+registerTool(
+  "write",
   "update-task-list",
   "Update the name of an existing task list (top-level container) in Microsoft Todo.",
   {
@@ -777,7 +862,8 @@ server.tool(
   },
 )
 
-server.tool(
+registerTool(
+  "destructive",
   "delete-task-list",
   "Delete a task list (top-level container) from Microsoft Todo. This will remove the list and all tasks within it.",
   {
@@ -826,7 +912,8 @@ server.tool(
   },
 )
 
-server.tool(
+registerTool(
+  "read",
   "get-tasks",
   "Get tasks from a specific Microsoft Todo list. These are the main todo items that can contain checklist items (subtasks).",
   {
@@ -959,7 +1046,8 @@ server.tool(
   },
 )
 
-server.tool(
+registerTool(
+  "write",
   "create-task",
   "Create a new task in a specific Microsoft Todo list. A task is the main todo item that can have a title, description, due date, and other properties.",
   {
@@ -1089,7 +1177,8 @@ server.tool(
   },
 )
 
-server.tool(
+registerTool(
+  "write",
   "update-task",
   "Update an existing task in Microsoft Todo. Allows changing any properties of the task including title, due date, importance, etc.",
   {
@@ -1252,7 +1341,8 @@ server.tool(
   },
 )
 
-server.tool(
+registerTool(
+  "destructive",
   "delete-task",
   "Delete a task from a Microsoft Todo list. This will remove the task and all its checklist items (subtasks).",
   {
@@ -1302,7 +1392,8 @@ server.tool(
   },
 )
 
-server.tool(
+registerTool(
+  "read",
   "get-checklist-items",
   "Get checklist items (subtasks) for a specific task. Checklist items are smaller steps or components that belong to a parent task.",
   {
@@ -1394,7 +1485,8 @@ server.tool(
   },
 )
 
-server.tool(
+registerTool(
+  "write",
   "create-checklist-item",
   "Create a new checklist item (subtask) for a task. Checklist items help break down a task into smaller, manageable steps.",
   {
@@ -1466,7 +1558,8 @@ server.tool(
   },
 )
 
-server.tool(
+registerTool(
+  "write",
   "update-checklist-item",
   "Update an existing checklist item (subtask). Allows changing the text content or completion status of the subtask.",
   {
@@ -1555,7 +1648,8 @@ server.tool(
   },
 )
 
-server.tool(
+registerTool(
+  "destructive",
   "delete-checklist-item",
   "Delete a checklist item (subtask) from a task. This removes just the specific subtask, not the parent task.",
   {
@@ -1606,9 +1700,326 @@ server.tool(
   },
 )
 
+// Cross-list queries — Graph's To Do endpoint scopes every task query to a single list,
+// so "search everything" and "what's due today" both mean fanning out over the lists and
+// combining the results here. Shared plumbing for search-tasks and get-agenda:
+
+const TASK_PAGE_SIZE = 100
+// Cap the paging so one enormous list can't hang the whole fan-out.
+const MAX_TASK_PAGES_PER_LIST = 10
+// Querying a dozen lists at once reliably trips Graph's throttle, so keep the burst small.
+const LIST_FETCH_CONCURRENCY = 4
+
+interface TaskPage {
+  value: Task[]
+  "@odata.nextLink"?: string
+}
+
+/** Page through one list's tasks. Returns null only if the list couldn't be read at all. */
+async function fetchTasksInList(token: string, list: TaskList): Promise<AgendaTask[] | null> {
+  let url: string | undefined = `${MS_GRAPH_BASE}/me/todo/lists/${list.id}/tasks?$top=${TASK_PAGE_SIZE}`
+  const collected: AgendaTask[] = []
+
+  for (let page = 0; page < MAX_TASK_PAGES_PER_LIST && url; page++) {
+    const response: TaskPage | null = await makeGraphRequest<TaskPage>(url, token)
+    if (!response) return collected.length > 0 ? collected : null
+
+    for (const task of response.value ?? []) {
+      collected.push({ ...task, listId: list.id, listName: list.displayName })
+    }
+
+    url = response["@odata.nextLink"]
+  }
+
+  return collected
+}
+
+/** Resolve `listIds` entries against list IDs first, then display names — IDs are opaque
+ * base64 blobs, so letting callers say "Work" instead saves a get-task-lists round trip. */
+function selectLists(lists: TaskList[], selectors?: string[]): TaskList[] {
+  if (!selectors || selectors.length === 0) return lists
+
+  const wanted = new Set(selectors.map((selector) => selector.trim().toLowerCase()))
+  return lists.filter((list) => wanted.has(list.id.toLowerCase()) || wanted.has(list.displayName.toLowerCase()))
+}
+
+interface CollectedTasks {
+  tasks: AgendaTask[]
+  lists: TaskList[]
+  /** Lists that errored — reported to the caller so an empty result isn't read as "none". */
+  failedLists: string[]
+}
+
+async function collectTasksAcrossLists(token: string, listSelectors?: string[]): Promise<CollectedTasks | null> {
+  const listsResponse = await makeGraphRequest<{ value: TaskList[] }>(`${MS_GRAPH_BASE}/me/todo/lists`, token)
+  if (!listsResponse?.value) return null
+
+  const lists = selectLists(listsResponse.value, listSelectors)
+  const results = await mapWithConcurrency(lists, LIST_FETCH_CONCURRENCY, async (list) => ({
+    list,
+    tasks: await fetchTasksInList(token, list),
+  }))
+
+  const tasks: AgendaTask[] = []
+  const failedLists: string[] = []
+
+  for (const result of results) {
+    if (result.tasks === null) failedLists.push(result.list.displayName)
+    else tasks.push(...result.tasks)
+  }
+
+  return { tasks, lists, failedLists }
+}
+
+/** One task as three lines: title, context, and the IDs a follow-up tool call needs. */
+function formatCrossListTask(task: AgendaTask, options: { showDue?: boolean } = {}): string {
+  const marker = task.status === "completed" ? "✓" : "○"
+  const details = [`list: ${task.listName}`]
+
+  const dueDay = dueDayKey(task.dueDateTime)
+  if (options.showDue && dueDay) details.push(`due: ${dueDay}`)
+  if (task.importance && task.importance !== "normal") details.push(`importance: ${task.importance}`)
+  if (task.categories && task.categories.length > 0) details.push(`categories: ${task.categories.join(", ")}`)
+
+  return `${marker} ${task.title}\n    ${details.join(" · ")}\n    id: ${task.id}\n    listId: ${task.listId}`
+}
+
+function formatFailedLists(failedLists: string[]): string {
+  if (failedLists.length === 0) return ""
+  return `\n\n⚠️ Could not read ${failedLists.length} list(s), so results may be incomplete: ${failedLists.join(", ")}`
+}
+
+registerTool(
+  "read",
+  "search-tasks",
+  "Search tasks by text across every Microsoft Todo list at once, or a chosen subset. Use this when you know roughly what a task is called but not which list holds it — get-tasks requires a listId, this does not. Matches the title and categories (and optionally the description) case-insensitively; every whitespace-separated term must appear, in any order.",
+  {
+    query: z
+      .string()
+      .describe("Text to match. Multiple words must all appear somewhere, in any order (e.g. 'tax invoice')"),
+    listIds: z
+      .array(z.string())
+      .optional()
+      .describe("Restrict the search to these lists — either list IDs or exact list names. Default: all lists"),
+    searchBody: z.boolean().optional().default(false).describe("Also search task descriptions (default: false)"),
+    includeCompleted: z.boolean().optional().default(false).describe("Include completed tasks (default: false)"),
+    importance: z.enum(["low", "normal", "high"]).optional().describe("Only return tasks with this importance"),
+    dueBefore: z.string().optional().describe("Only tasks due on or before this date (YYYY-MM-DD)"),
+    dueAfter: z.string().optional().describe("Only tasks due on or after this date (YYYY-MM-DD)"),
+    limit: z.number().min(1).max(200).optional().default(50).describe("Maximum results to return (default: 50)"),
+  },
+  async ({ query, listIds, searchBody, includeCompleted, importance, dueBefore, dueAfter, limit }) => {
+    try {
+      const token = await getAccessToken()
+      if (!token) {
+        return { content: [{ type: "text", text: "Failed to authenticate with Microsoft API" }] }
+      }
+
+      const collected = await collectTasksAcrossLists(token, listIds)
+      if (!collected) {
+        return { content: [{ type: "text", text: "Failed to retrieve task lists" }] }
+      }
+
+      if (collected.lists.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `No lists matched ${JSON.stringify(listIds)}. Run get-task-lists to see the available lists.`,
+            },
+          ],
+        }
+      }
+
+      // Day keys are YYYY-MM-DD, so plain string comparison orders them correctly.
+      const before = dueBefore?.slice(0, 10)
+      const after = dueAfter?.slice(0, 10)
+
+      const matches = collected.tasks
+        .filter((task) => {
+          if (!includeCompleted && task.status === "completed") return false
+          if (importance && task.importance !== importance) return false
+          if (!matchesQuery(task, query, { searchBody })) return false
+
+          if (before || after) {
+            const dueDay = dueDayKey(task.dueDateTime)
+            if (!dueDay) return false
+            if (before && dueDay > before) return false
+            if (after && dueDay < after) return false
+          }
+
+          return true
+        })
+        .sort(compareTasksByDue)
+
+      const shown = matches.slice(0, limit)
+      const scope = listIds?.length ? `${collected.lists.length} selected list(s)` : `${collected.lists.length} lists`
+
+      if (shown.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `No tasks matching "${query}" in ${scope}.${
+                includeCompleted ? "" : " Completed tasks were excluded — set includeCompleted to include them."
+              }${formatFailedLists(collected.failedLists)}`,
+            },
+          ],
+        }
+      }
+
+      const truncation =
+        matches.length > shown.length
+          ? `\n\nShowing the first ${shown.length} of ${matches.length} matches — raise limit or narrow the query for more.`
+          : ""
+
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Found ${matches.length} task(s) matching "${query}" in ${scope}:\n\n` +
+              shown.map((task) => formatCrossListTask(task, { showDue: true })).join("\n\n") +
+              truncation +
+              formatFailedLists(collected.failedLists),
+          },
+        ],
+      }
+    } catch (error) {
+      return { content: [{ type: "text", text: `Error searching tasks: ${error}` }] }
+    }
+  },
+)
+
+const AGENDA_SECTIONS: Array<{ bucket: AgendaBucket; heading: string }> = [
+  { bucket: "overdue", heading: "⚠️ Overdue" },
+  { bucket: "today", heading: "📅 Today" },
+  { bucket: "tomorrow", heading: "➡️ Tomorrow" },
+  { bucket: "upcoming", heading: "🗓️ Upcoming" },
+  { bucket: "noDueDate", heading: "📥 No due date" },
+]
+
+registerTool(
+  "read",
+  "get-agenda",
+  "Roll up everything due across all Microsoft Todo lists into overdue / today / tomorrow / upcoming sections. Answers 'what's on my plate?' in one call, without needing a listId or one get-tasks call per list. Overdue tasks are always included regardless of how far back they go.",
+  {
+    days: z
+      .number()
+      .min(0)
+      .max(90)
+      .optional()
+      .default(7)
+      .describe("How many days ahead to include beyond today (default: 7)"),
+    listIds: z
+      .array(z.string())
+      .optional()
+      .describe("Restrict to these lists — either list IDs or exact list names. Default: all lists"),
+    includeNoDueDate: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe("Add a section for tasks with no due date (default: false)"),
+    includeCompleted: z.boolean().optional().default(false).describe("Include completed tasks (default: false)"),
+    timeZone: z
+      .string()
+      .optional()
+      .describe(
+        "IANA time zone deciding which day counts as 'today', e.g. 'America/Chicago'. Defaults to MSTODO_TIMEZONE, then the server's local zone",
+      ),
+  },
+  async ({ days, listIds, includeNoDueDate, includeCompleted, timeZone }) => {
+    try {
+      const zone = timeZone ?? process.env.MSTODO_TIMEZONE
+      if (zone && !isValidTimeZone(zone)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Unknown time zone: "${zone}". Use an IANA name such as 'America/Chicago' or 'Europe/London'.`,
+            },
+          ],
+        }
+      }
+
+      const token = await getAccessToken()
+      if (!token) {
+        return { content: [{ type: "text", text: "Failed to authenticate with Microsoft API" }] }
+      }
+
+      const collected = await collectTasksAcrossLists(token, listIds)
+      if (!collected) {
+        return { content: [{ type: "text", text: "Failed to retrieve task lists" }] }
+      }
+
+      if (collected.lists.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `No lists matched ${JSON.stringify(listIds)}. Run get-task-lists to see the available lists.`,
+            },
+          ],
+        }
+      }
+
+      const todayKey = dayKeyInZone(new Date(), zone)
+      const buckets = new Map<AgendaBucket, AgendaTask[]>()
+
+      for (const task of collected.tasks) {
+        if (!includeCompleted && task.status === "completed") continue
+
+        const bucket = bucketForTask(task, todayKey, days)
+        if (!bucket) continue
+        if (bucket === "noDueDate" && !includeNoDueDate) continue
+
+        const existing = buckets.get(bucket)
+        if (existing) existing.push(task)
+        else buckets.set(bucket, [task])
+      }
+
+      const zoneLabel = zone ?? Intl.DateTimeFormat().resolvedOptions().timeZone
+      const header = `Agenda for ${todayKey} (${zoneLabel}) — ${collected.lists.length} list(s), next ${days} day(s)`
+
+      const sections = AGENDA_SECTIONS.flatMap(({ bucket, heading }) => {
+        const tasks = buckets.get(bucket)
+        if (!tasks || tasks.length === 0) return []
+
+        const body = tasks.sort(compareTasksByDue).map((task) => formatCrossListTask(task, { showDue: true }))
+        return [`${heading} (${tasks.length})\n\n${body.join("\n\n")}`]
+      })
+
+      if (sections.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `${header}\n\nNothing due. 🎉${formatFailedLists(collected.failedLists)}`,
+            },
+          ],
+        }
+      }
+
+      const total = [...buckets.values()].reduce((sum, tasks) => sum + tasks.length, 0)
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${header}\n${total} task(s)\n\n` + sections.join("\n\n") + formatFailedLists(collected.failedLists),
+          },
+        ],
+      }
+    } catch (error) {
+      return { content: [{ type: "text", text: `Error building agenda: ${error}` }] }
+    }
+  },
+)
+
 // Microsoft Planner — powers the "Assigned to me" view in the To Do app, which draws
 // from Planner plans (e.g. a project's Planner board), not the native To Do lists above.
-server.tool(
+registerTool(
+  "read",
   "get-assigned-planner-tasks",
   "Get Microsoft Planner tasks assigned to you across all plans (e.g. project boards). This is what powers the 'Assigned to me' view in the Microsoft To Do app — distinct from your native To Do lists.",
   {},
@@ -1694,7 +2105,8 @@ server.tool(
   },
 )
 
-server.tool(
+registerTool(
+  "read",
   "get-planner-task-details",
   "Get the full description and checklist for a specific Microsoft Planner task. Use get-assigned-planner-tasks first to find the task ID.",
   {
@@ -1807,7 +2219,8 @@ async function updatePlannerTaskWithRetry(
   return null
 }
 
-server.tool(
+registerTool(
+  "write",
   "update-planner-task",
   "Update a Microsoft Planner task — progress, title, priority, or dates. Handles the ETag concurrency check Planner requires automatically. Use get-assigned-planner-tasks first to find the task ID.",
   {
@@ -1901,7 +2314,8 @@ server.tool(
 )
 
 // Bulk archive completed tasks
-server.tool(
+registerTool(
+  "destructive",
   "archive-completed-tasks",
   "Move completed tasks older than a specified number of days from one list to another (archive) list. Useful for cleaning up active lists while preserving historical tasks.",
   {
@@ -2047,7 +2461,8 @@ server.tool(
 )
 
 // Test tool to explore Graph API for hidden properties
-server.tool(
+registerTool(
+  "read",
   "test-graph-api-exploration",
   "Test various Graph API queries to discover hidden properties or endpoints for folder/group organization in Microsoft To Do.",
   {
@@ -2226,6 +2641,11 @@ server.tool(
 // Main function to start the server
 export async function startServer(): Promise<void> {
   try {
+    console.error(`Access mode: ${describeAccessMode(accessMode)}`)
+    if (withheldTools.length > 0) {
+      console.error(`Withheld ${withheldTools.length} tool(s): ${withheldTools.join(", ")}`)
+    }
+
     // Check if using a personal Microsoft account and show warning if needed
     await isPersonalMicrosoftAccount()
 
@@ -2240,10 +2660,9 @@ export async function startServer(): Promise<void> {
   }
 }
 
-// Main entry point when executed directly
-if (import.meta.url === `file://${process.argv[1]}`) {
-  startServer().catch((error) => {
-    console.error("Fatal error in main():", error)
-    process.exit(1)
-  })
-}
+// This module deliberately has no "am I the entry point, then start" block. Two things
+// make that unworkable here: tsdown bundles the entries and splits shared code, so
+// `dist/todo-index.js` is only a re-export shim around a hashed chunk whose
+// `import.meta.url` can never equal `process.argv[1]`; and `main` should stay importable
+// without the side effect of connecting a stdio transport. `src/cli.ts` (`dist/cli.js`)
+// is the single runnable entry — it's what `bin` and `pnpm start` both point at.
