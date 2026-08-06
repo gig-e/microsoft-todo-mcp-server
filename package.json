@@ -58,7 +58,8 @@
     "microsoft-todo-mcp-server": "./dist/cli.js",
     "mstodo": "./dist/cli.js",
     "mstodo-config": "./dist/create-mcp-config.js",
-    "mstodo-setup": "./dist/setup.js"
+    "mstodo-setup": "./dist/setup.js",
+    "mstodo-auth": "./dist/auth-server.js"
   },
   "files": [
     "dist"

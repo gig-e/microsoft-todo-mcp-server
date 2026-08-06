@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 // One-shot interactive sign-in for Microsoft To Do MCP.
 //
 // Uses MSAL Node's PublicClientApplication.acquireTokenInteractive(), which handles

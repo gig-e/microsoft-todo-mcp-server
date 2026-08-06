@@ -38,11 +38,19 @@ pnpm install -g microsoft-todo-mcp-server
 npx microsoft-todo-mcp-server
 ```
 
-The package provides three command aliases:
+The package provides these commands:
 
 - `microsoft-todo-mcp-server` - Full package name
 - `mstodo` - Short alias for the MCP server
+- `mstodo-setup` - Interactive setup: credentials, sign-in, access mode, client config
+- `mstodo-auth` - One-shot interactive sign-in on its own
 - `mstodo-config` - Configuration helper tool
+
+With a global install there is no repo to `cd` into, so `mstodo-setup` writes `.env` to the
+per-user config directory (`%APPDATA%\microsoft-todo-mcp\.env` /
+`~/.config/microsoft-todo-mcp/.env`), which survives `npm i -g` upgrades. In a git
+checkout it writes to the repo root instead. Both locations are read at startup, and real
+environment variables — such as the `env` block in your MCP client config — win over both.
 
 ### Option 2: Clone and Run Locally
 
@@ -258,18 +266,19 @@ machine you use this server from.
 #### Step 1: Authenticate with Microsoft
 
 ```bash
-# If installed globally
-git clone https://github.com/jordanburke/microsoft-todo-mcp-server.git
-cd microsoft-todo-mcp-server
-pnpm install
+# In a git checkout
 pnpm run auth
 
-# Or if running locally
-pnpm run auth
+# Installed globally
+mstodo-auth
 ```
 
 This opens a browser window for Microsoft authentication and stores your session in the
-encrypted per-machine token cache described above.
+encrypted per-machine token cache described above. It's one-shot — it exits once you've
+signed in, and binds no port of its own (MSAL's loopback callback listens on 127.0.0.1
+only). Run it once on every machine, since the cache can't be copied between them.
+
+`mstodo-setup` runs this step for you as part of the guided flow, so use one or the other.
 
 #### Step 2: Create MCP Configuration
 

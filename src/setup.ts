@@ -3,11 +3,33 @@
 import { spawn } from "child_process"
 import { existsSync, readFileSync, writeFileSync } from "fs"
 import { homedir } from "os"
-import { join } from "path"
+import { dirname, join } from "path"
 import readline from "readline"
+import { fileURLToPath } from "url"
 
 import { type AccessMode, DEFAULT_ACCESS_MODE, describeAccessMode, parseAccessMode } from "./access-mode.js"
-import { getCacheFilePath } from "./msal-client.js"
+import { packageEnvPath, userEnvPath } from "./load-env.js"
+import { getCacheFilePath, getConfigDir } from "./msal-client.js"
+
+// Everything below resolves against this module's own location, never process.cwd() —
+// `mstodo-setup` is a global bin, so the working directory is wherever the user happens
+// to be standing.
+const installDir = dirname(fileURLToPath(import.meta.url))
+const authScript = join(installDir, "auth-server.js")
+
+/**
+ * Where to write CLIENT_ID/TENANT_ID. A checkout gets `.env` at the repo root, matching
+ * what a developer expects; a global install gets it in the per-user config directory,
+ * which survives `npm i -g` upgrades instead of being wiped with node_modules.
+ * `load-env.ts` reads both.
+ */
+function resolveEnvTarget(): string {
+  if (existsSync(packageEnvPath)) return packageEnvPath
+  if (existsSync(join(installDir, "..", "src"))) return packageEnvPath
+
+  getConfigDir()
+  return userEnvPath
+}
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -59,7 +81,8 @@ async function setup() {
   }
 
   // Check for Azure app credentials
-  const hasEnvFile = existsSync(".env")
+  const envPath = resolveEnvTarget()
+  const hasEnvFile = existsSync(envPath)
 
   if (!hasEnvFile) {
     console.log("\n📋 Azure App Registration Required")
@@ -79,8 +102,8 @@ async function setup() {
     const envContent = `CLIENT_ID=${clientId}
 TENANT_ID=${tenantId}
 `
-    writeFileSync(".env", envContent)
-    console.log("✅ Created .env file")
+    writeFileSync(envPath, envContent)
+    console.log(`✅ Created ${envPath}`)
   }
 
   // Asked before the browser opens so every prompt happens up front.
@@ -89,10 +112,11 @@ TENANT_ID=${tenantId}
   console.log("\n🔐 Starting authentication flow...")
   console.log("A browser window will open. Please sign in with your Microsoft account.\n")
 
-  // Run the interactive sign-in; it writes directly to the encrypted per-machine token store
-  const authProcess = spawn("node", ["dist/auth-server.js"], {
+  // Run the interactive sign-in; it writes directly to the encrypted per-machine token
+  // store. process.execPath rather than "node" so we reuse the interpreter already
+  // running, and no shell — the install path routinely contains spaces.
+  const authProcess = spawn(process.execPath, [authScript], {
     stdio: "inherit",
-    shell: true,
   })
 
   authProcess.on("close", async (code) => {

@@ -17,11 +17,16 @@ export const scopes = [
   "User.Read",
 ]
 
+/** The per-user config directory path, without touching the filesystem. */
+export function getConfigDirPath(): string {
+  return process.platform === "win32"
+    ? join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "microsoft-todo-mcp")
+    : join(homedir(), ".config", "microsoft-todo-mcp")
+}
+
+/** As above, but creates the directory — use this before writing into it. */
 export function getConfigDir(): string {
-  const configDir =
-    process.platform === "win32"
-      ? join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "microsoft-todo-mcp")
-      : join(homedir(), ".config", "microsoft-todo-mcp")
+  const configDir = getConfigDirPath()
 
   if (!existsSync(configDir)) {
     mkdirSync(configDir, { recursive: true })

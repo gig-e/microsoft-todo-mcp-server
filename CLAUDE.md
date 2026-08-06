@@ -21,8 +21,20 @@ Build tooling is provided by **ts-builds** (3.x); package scripts delegate to th
 
 ```bash
 pnpm run auth        # Run interactive PKCE sign-in (opens browser, no server/port)
+pnpm run setup       # Guided setup: credentials, sign-in, access mode, client config
 pnpm run create-config # Generate mcp.json (no tokens embedded)
 ```
+
+Published bins: `mstodo`/`microsoft-todo-mcp-server` (server), `mstodo-setup`,
+`mstodo-auth`, `mstodo-config`. Anything reachable as a global bin must resolve paths
+against its own module location, never `process.cwd()` — `setup.ts` locates
+`auth-server.js` as a sibling and spawns it with `process.execPath` (no shell; install
+paths contain spaces).
+
+`.env` is read from two places, package root first then `<configDir>/.env`; dotenv never
+overrides an already-set variable, so the MCP client's `env` block beats both. `setup.ts`
+writes to the repo root in a checkout and to the config dir for a global install, where
+the package root is wiped on upgrade.
 
 ### Running the Server
 
