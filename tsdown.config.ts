@@ -13,6 +13,8 @@ export default defineConfig({
     "src/auth-server.ts",
     "src/setup.ts",
     "src/token-manager.ts",
+    "src/http-server.ts",
+    "src/seed-cloud-token.ts",
   ],
   outDir: "dist",
   format: ["esm"],

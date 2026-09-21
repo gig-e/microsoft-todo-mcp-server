@@ -22,15 +22,16 @@ import { tokenManager } from "./token-manager.js"
 const MS_GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 const USER_AGENT = "microsoft-todo-mcp-server/1.0"
 
-// Create server instance
-const server = new McpServer({
+// Create server instance. Exported so src/http-server.ts can connect a second (HTTP)
+// transport to the same instance without duplicating tool registration.
+export const server = new McpServer({
   name: "mstodo",
   version: "1.0.0",
 })
 
 // A bad MSTODO_ACCESS_MODE is fatal by design — see access-mode.ts. Exit with just the
 // message rather than a stack trace, since MCP clients surface stderr to the user raw.
-const accessMode: AccessMode = ((): AccessMode => {
+export const accessMode: AccessMode = ((): AccessMode => {
   try {
     return parseAccessMode(process.env.MSTODO_ACCESS_MODE)
   } catch (error) {
@@ -39,7 +40,7 @@ const accessMode: AccessMode = ((): AccessMode => {
   }
 })()
 
-const withheldTools: string[] = []
+export const withheldTools: string[] = []
 
 /**
  * Register a tool only if the configured access mode permits it. Withheld tools never
@@ -191,7 +192,7 @@ async function getAccessToken(): Promise<string | null> {
 }
 
 // Function to check if the account is a personal Microsoft account
-async function isPersonalMicrosoftAccount(): Promise<boolean> {
+export async function isPersonalMicrosoftAccount(): Promise<boolean> {
   try {
     const token = await getAccessToken()
     if (!token) return false

@@ -1,9 +1,11 @@
 {
   "name": "microsoft-todo-mcp-server",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Microsoft Todo MCP service for Claude and Cursor. Fork of @jhirono/todomcp",
   "main": "dist/todo-index.js",
   "dependencies": {
+    "@azure/identity": "^4.13.3",
+    "@azure/keyvault-secrets": "^4.11.2",
     "@azure/msal-node": "^5.4.3",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "dotenv": "^16.6.1",
@@ -21,6 +23,8 @@
     "auth": "node dist/auth-server.js",
     "setup": "node dist/setup.js",
     "create-config": "node dist/create-mcp-config.js",
+    "cloud-server": "node dist/http-server.js",
+    "seed-cloud-token": "node dist/seed-cloud-token.js",
     "format": "ts-builds format",
     "format:check": "ts-builds format:check",
     "lint": "ts-builds lint",
