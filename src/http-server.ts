@@ -6,7 +6,7 @@
 // tool set.
 import "./load-env.js"
 
-import { timingSafeEqual } from "node:crypto"
+import { randomUUID, timingSafeEqual } from "node:crypto"
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http"
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
@@ -32,6 +32,50 @@ function isAuthorized(header: string | undefined): boolean {
   return expected.length === actual.length && timingSafeEqual(expected, actual)
 }
 
+// Stateful mode (a session ID per client), not stateless: the SDK's stateless transport
+// throws "Stateless transport cannot be reused across requests" on the second call to
+// handleRequest — it's meant to be constructed fresh per request. Stateful mode instead
+// requires one transport per session, and the MCP SDK's Server can only ever be connected
+// to one transport at a time ("Already connected to a transport. Call close() before
+// connecting to a new transport, or use a separate Protocol instance per connection.") —
+// so a second client's `initialize` fails outright unless the previous session is closed
+// first. This is a single-user tool (not a multi-tenant service), so rather than
+// refactoring todo-index.ts into a per-session server factory, the simpler fit is: track
+// the one active session, and close-then-reconnect the same shared `server` when a new
+// session starts. That does mean a second concurrent client would evict the first, which
+// is an acceptable trade for this use case.
+let activeTransport: StreamableHTTPServerTransport | undefined
+let activeSessionId: string | undefined
+
+async function getTransportForRequest(req: IncomingMessage): Promise<StreamableHTTPServerTransport> {
+  const rawSessionId = req.headers["mcp-session-id"]
+  const sessionIdHeader = Array.isArray(rawSessionId) ? rawSessionId[0] : rawSessionId
+
+  if (activeTransport && sessionIdHeader !== undefined && sessionIdHeader === activeSessionId) {
+    return activeTransport
+  }
+
+  if (activeTransport) {
+    await server.close()
+    activeTransport = undefined
+    activeSessionId = undefined
+  }
+
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: randomUUID,
+    onsessioninitialized: (newSessionId) => {
+      activeSessionId = newSessionId
+    },
+  })
+  transport.onclose = () => {
+    activeTransport = undefined
+    activeSessionId = undefined
+  }
+  await server.connect(transport)
+  activeTransport = transport
+  return transport
+}
+
 async function main() {
   console.error(`Access mode: ${describeAccessMode(accessMode)}`)
   if (withheldTools.length > 0) {
@@ -40,14 +84,11 @@ async function main() {
 
   await isPersonalMicrosoftAccount()
 
-  // Stateless mode: Container Apps can run multiple replicas with no sticky sessions, so
-  // per-request statelessness avoids a class of multi-instance bugs. Deploy with
-  // --max-replicas 1 anyway, since this is a single-user tool.
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
-  await server.connect(transport)
-
   const httpServer = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
-    if (req.method !== "POST" || req.url !== "/mcp") {
+    // GET is allowed alongside POST: the transport's standalone SSE stream, and some MCP
+    // clients (e.g. mcp-remote) probe/fall back to a GET-based transport strategy when an
+    // OAuth discovery request 404s, which it does here since we don't implement OAuth.
+    if (req.url !== "/mcp") {
       res.writeHead(404).end()
       return
     }
@@ -57,12 +98,14 @@ async function main() {
       return
     }
 
-    transport.handleRequest(req, res).catch((error) => {
-      console.error("Error handling request:", error)
-      if (!res.headersSent) {
-        res.writeHead(500).end()
-      }
-    })
+    getTransportForRequest(req)
+      .then((transport) => transport.handleRequest(req, res))
+      .catch((error) => {
+        console.error("Error handling request:", error)
+        if (!res.headersSent) {
+          res.writeHead(500).end()
+        }
+      })
   })
 
   httpServer.listen(PORT, () => {
