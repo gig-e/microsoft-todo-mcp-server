@@ -15,6 +15,7 @@ export default defineConfig({
     "src/token-manager.ts",
     "src/http-server.ts",
     "src/seed-cloud-token.ts",
+    "src/local-proxy.ts",
   ],
   outDir: "dist",
   format: ["esm"],
