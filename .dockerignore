@@ -1,0 +1,8 @@
+node_modules
+dist
+.env
+.env.*
+.cloud-token-cache.bin
+token-cache.bin
+.git
+.github

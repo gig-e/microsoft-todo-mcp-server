@@ -11,16 +11,23 @@ const ALGORITHM = "aes-256-gcm"
 const IV_LENGTH = 12
 const AUTH_TAG_LENGTH = 16
 
-// Deriving the key from the machine id (rather than a stored/random key) means the
-// ciphertext only decrypts on the machine that wrote it — copying the file elsewhere
-// (e.g. via OneDrive sync) yields unusable bytes instead of portable credentials.
-function deriveKey(): Buffer {
-  const machineId = machineIdSync()
-  return scryptSync(machineId, KEY_SALT, 32)
+function deriveKey(keyMaterial: string): Buffer {
+  return scryptSync(keyMaterial, KEY_SALT, 32)
 }
 
-export function encrypt(plaintext: string): Buffer {
-  const key = deriveKey()
+/**
+ * The key material to encrypt with. Local mode derives it from the machine id (so the
+ * ciphertext only decrypts on the machine that wrote it — copying the file elsewhere, e.g.
+ * via OneDrive sync, yields unusable bytes instead of portable credentials). Server mode
+ * (Azure Container Apps) has no single "machine" to bind to, so it uses a fixed secret from
+ * MSTODO_ENCRYPTION_KEY instead — set only when running as the HTTP/cloud server.
+ */
+export function resolveKeyMaterial(): string {
+  return process.env.MSTODO_ENCRYPTION_KEY || machineIdSync()
+}
+
+export function encrypt(plaintext: string, keyMaterial: string): Buffer {
+  const key = deriveKey(keyMaterial)
   const iv = randomBytes(IV_LENGTH)
   const cipher = createCipheriv(ALGORITHM, key, iv)
   const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()])
@@ -28,8 +35,8 @@ export function encrypt(plaintext: string): Buffer {
   return Buffer.concat([iv, authTag, ciphertext])
 }
 
-export function decrypt(data: Buffer): string {
-  const key = deriveKey()
+export function decrypt(data: Buffer, keyMaterial: string): string {
+  const key = deriveKey(keyMaterial)
   const iv = data.subarray(0, IV_LENGTH)
   const authTag = data.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH)
   const ciphertext = data.subarray(IV_LENGTH + AUTH_TAG_LENGTH)
@@ -38,19 +45,19 @@ export function decrypt(data: Buffer): string {
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8")
 }
 
-export function readEncryptedFile(path: string): string | null {
+export function readEncryptedFile(path: string, keyMaterial: string): string | null {
   if (!existsSync(path)) {
     return null
   }
 
   try {
-    return decrypt(readFileSync(path))
+    return decrypt(readFileSync(path), keyMaterial)
   } catch (error) {
     console.error(`Could not decrypt token store at ${path}; treating as absent.`, error)
     return null
   }
 }
 
-export function writeEncryptedFile(path: string, content: string): void {
-  writeFileSync(path, encrypt(content))
+export function writeEncryptedFile(path: string, content: string, keyMaterial: string): void {
+  writeFileSync(path, encrypt(content, keyMaterial))
 }
