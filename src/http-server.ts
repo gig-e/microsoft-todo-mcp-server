@@ -85,6 +85,17 @@ async function main() {
   await isPersonalMicrosoftAccount()
 
   const httpServer = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
+    // Dedicated, unauthenticated health endpoint for Container Apps' startup/liveness
+    // probes (configured explicitly to hit this path — see the deploy notes). Azure's
+    // default probe otherwise hits "/" (which we'd 404) or would need to carry the bearer
+    // token to get anything but 401 from "/mcp", so the platform would never consider a
+    // replica healthy even though the app is fine — this is a documented Container-Apps-
+    // plus-MCP-server gotcha, not something specific to this server's auth design.
+    if (req.url === "/health") {
+      res.writeHead(200, { "content-type": "text/plain" }).end("ok")
+      return
+    }
+
     // GET is allowed alongside POST: the transport's standalone SSE stream, and some MCP
     // clients (e.g. mcp-remote) probe/fall back to a GET-based transport strategy when an
     // OAuth discovery request 404s, which it does here since we don't implement OAuth.
