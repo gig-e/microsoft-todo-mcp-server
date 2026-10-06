@@ -18,13 +18,13 @@ Claude Code ─────────────── HTTP + Bearer ──�
                                                             (encrypted MSAL cache)
 ```
 
-| Piece                     | Role                                                                                                 |
-| ------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `src/http-server.ts`      | HTTP entry point. Serves MCP at `/mcp` behind a static bearer token; unauthenticated `GET /health`.  |
-| `src/token-store.ts`      | `MSTODO_TOKEN_STORE=key-vault` keeps the encrypted token cache in a Key Vault secret, not on disk.   |
+| Piece                     | Role                                                                                                |
+| ------------------------- | --------------------------------------------------------------------------------------------------- |
+| `src/http-server.ts`      | HTTP entry point. Serves MCP at `/mcp` behind a static bearer token; unauthenticated `GET /health`. |
+| `src/token-store.ts`      | `MSTODO_TOKEN_STORE=key-vault` keeps the encrypted token cache in a Key Vault secret, not on disk.  |
 | `src/seed-cloud-token.ts` | One-time local step: re-encrypts your existing signed-in cache with the server's key for upload.    |
-| `src/local-proxy.ts`      | stdio ↔ HTTP relay for Claude Desktop, which can't send a static bearer token to a remote server.    |
-| `Dockerfile`              | Two-stage `node:22-slim` image running `dist/http-server.js`.                                        |
+| `src/local-proxy.ts`      | stdio ↔ HTTP relay for Claude Desktop, which can't send a static bearer token to a remote server.   |
+| `Dockerfile`              | Two-stage `node:22-slim` image running `dist/http-server.js`.                                       |
 
 There is no interactive sign-in in the container. You sign in locally once, then seed the
 resulting token cache into Key Vault. From then on the server refreshes tokens silently and
@@ -34,27 +34,27 @@ writes the updated cache back to the same secret.
 
 **Server (Container App):**
 
-| Variable                   | Required | Purpose                                                                                         |
-| -------------------------- | -------- | ----------------------------------------------------------------------------------------------- |
-| `CLIENT_ID`                | yes      | App registration client ID, same as local.                                                      |
-| `TENANT_ID`                | yes\*    | Same as local (\*defaults to `organizations`).                                                  |
-| `MSTODO_BEARER_TOKEN`      | yes      | Shared secret clients must send as `Authorization: Bearer <token>`. Server exits without it.   |
+| Variable                   | Required | Purpose                                                                                                 |
+| -------------------------- | -------- | ------------------------------------------------------------------------------------------------------- |
+| `CLIENT_ID`                | yes      | App registration client ID, same as local.                                                              |
+| `TENANT_ID`                | yes\*    | Same as local (\*defaults to `organizations`).                                                          |
+| `MSTODO_BEARER_TOKEN`      | yes      | Shared secret clients must send as `Authorization: Bearer <token>`. Server exits without it.            |
 | `MSTODO_ENCRYPTION_KEY`    | yes      | Key material for the token cache. Replaces the machine-ID key, since a container has no stable machine. |
-| `MSTODO_TOKEN_STORE`       | yes      | Set to `key-vault`. Anything else falls back to a local file, which is lost on restart.         |
-| `MSTODO_KEYVAULT_URL`      | yes      | e.g. `https://<vault>.vault.azure.net/`                                                         |
-| `MSTODO_TOKEN_SECRET_NAME` | yes      | Name of the Key Vault secret holding the cache.                                                 |
-| `MSTODO_ACCESS_MODE`       | no       | `read` / `write` / `full`, same as local. Defaults to `full`.                                   |
-| `MSTODO_TIMEZONE`          | no       | **Set this.** The container runs in UTC, so without it `get-agenda` decides "today" in UTC.    |
-| `PORT`                     | no       | Injected by Container Apps; defaults to `8080`.                                                 |
+| `MSTODO_TOKEN_STORE`       | yes      | Set to `key-vault`. Anything else falls back to a local file, which is lost on restart.                 |
+| `MSTODO_KEYVAULT_URL`      | yes      | e.g. `https://<vault>.vault.azure.net/`                                                                 |
+| `MSTODO_TOKEN_SECRET_NAME` | yes      | Name of the Key Vault secret holding the cache.                                                         |
+| `MSTODO_ACCESS_MODE`       | no       | `read` / `write` / `full`, same as local. Defaults to `full`.                                           |
+| `MSTODO_TIMEZONE`          | no       | **Set this.** The container runs in UTC, so without it `get-agenda` decides "today" in UTC.             |
+| `PORT`                     | no       | Injected by Container Apps; defaults to `8080`.                                                         |
 
 Store `MSTODO_BEARER_TOKEN` and `MSTODO_ENCRYPTION_KEY` as Container App secrets and reference
 them with `secretref:`, not as plain env values.
 
 **Client (`local-proxy.js`):**
 
-| Variable            | Purpose                                                  |
-| ------------------- | -------------------------------------------------------- |
-| `MSTODO_AUTH_TOKEN` | The same value as the server's `MSTODO_BEARER_TOKEN`.    |
+| Variable            | Purpose                                               |
+| ------------------- | ----------------------------------------------------- |
+| `MSTODO_AUTH_TOKEN` | The same value as the server's `MSTODO_BEARER_TOKEN`. |
 
 ## Deployment
 
@@ -110,7 +110,7 @@ az containerapp up --name <app> --resource-group <rg> --environment <env> \
 
 The server authenticates to Key Vault with `DefaultAzureCredential`, which picks up the
 Container App's managed identity. It needs to **read and write** the secret, because token refreshes
-are written back. Assign *Key Vault Secrets Officer*, not *Secrets User*:
+are written back. Assign _Key Vault Secrets Officer_, not _Secrets User_:
 
 ```bash
 az containerapp identity assign --name <app> --resource-group <rg> --system-assigned
@@ -199,10 +199,7 @@ and no `.env`.
   "mcpServers": {
     "microsoftTodoCloud": {
       "command": "node",
-      "args": [
-        "C:\\path\\to\\microsoft-todo-mcp-server\\dist\\local-proxy.js",
-        "https://<app-fqdn>/mcp"
-      ],
+      "args": ["C:\\path\\to\\microsoft-todo-mcp-server\\dist\\local-proxy.js", "https://<app-fqdn>/mcp"],
       "env": { "MSTODO_AUTH_TOKEN": "<bearer-token>" }
     }
   }
@@ -240,7 +237,7 @@ The bearer token sits in plain text in this config file. Treat the file accordin
 - **`MSTODO_TOKEN_STORE=key-vault requires ...`**: `MSTODO_KEYVAULT_URL` or
   `MSTODO_TOKEN_SECRET_NAME` is missing.
 - **403 from Key Vault**: the managed identity lacks a role on the vault, or has a read-only
-  one (refresh write-back needs *Secrets Officer*).
+  one (refresh write-back needs _Secrets Officer_).
 - **Decryption errors at startup or on the first tool call**: the server's `MSTODO_ENCRYPTION_KEY` doesn't match the
   key used when seeding. Re-run step 2 with the server's key.
 - **Claude Desktop connector fails**: check
