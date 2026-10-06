@@ -29,6 +29,7 @@ coverage/
 # pointed at a path inside the repo.
 tokens.json
 token-cache.bin
+.cloud-token-cache.bin
 
 # Editor directories and files
 .idea/

@@ -7,7 +7,8 @@ A Model Context Protocol (MCP) server that enables AI assistants like Claude and
 
 ## Features
 
-- **15 MCP Tools**: Complete task management functionality including lists, tasks, checklist items, and organization features
+- **21 MCP Tools**: Complete task management functionality including lists, tasks, checklist items, cross-list search, and organization features
+- **Configurable Access Level**: Expose the server as read-only, read/write, or full control. See [Access Modes](#access-modes)
 - **Seamless Authentication**: Automatic token refresh with zero manual intervention
 - **OAuth 2.0 Authentication**: Secure authentication with automatic token refresh
 - **Microsoft Graph API Integration**: Direct integration with Microsoft's official API
@@ -37,11 +38,19 @@ pnpm install -g microsoft-todo-mcp-server
 npx microsoft-todo-mcp-server
 ```
 
-The package provides three command aliases:
+The package provides these commands:
 
 - `microsoft-todo-mcp-server` - Full package name
 - `mstodo` - Short alias for the MCP server
+- `mstodo-setup` - Interactive setup: credentials, sign-in, access mode, client config
+- `mstodo-auth` - One-shot interactive sign-in on its own
 - `mstodo-config` - Configuration helper tool
+
+With a global install there is no repo to `cd` into, so `mstodo-setup` writes `.env` to the
+per-user config directory (`%APPDATA%\microsoft-todo-mcp\.env` /
+`~/.config/microsoft-todo-mcp/.env`), which survives `npm i -g` upgrades. In a git
+checkout it writes to the repo root instead. Both locations are read at startup, and real
+environment variables (such as the `env` block in your MCP client config) win over both.
 
 ### Option 2: Clone and Run Locally
 
@@ -55,7 +64,7 @@ pnpm run build
 ## Azure App Registration
 
 This app authenticates as a **public client** using the OAuth 2.0 authorization code
-flow with PKCE — there is no client secret.
+flow with PKCE. There is no client secret.
 
 ### Option A: Azure Portal
 
@@ -67,7 +76,7 @@ flow with PKCE — there is no client secret.
    - **Accounts in any organizational directory (Any Azure AD directory - Multitenant)** - For use across multiple organizations
    - **Accounts in any organizational directory and personal Microsoft accounts** - For both work accounts and personal accounts
 5. Under "Authentication", add a platform of type **"Mobile and desktop applications"** and add
-   `http://localhost` as a redirect URI. Do **not** use the "Web" platform type — that requires a
+   `http://localhost` as a redirect URI. Do **not** use the "Web" platform type; that requires a
    client secret, which this app does not use.
 6. Go to "API permissions" and add the following permissions:
    - Microsoft Graph > Delegated permissions:
@@ -76,10 +85,10 @@ flow with PKCE — there is no client secret.
      - Tasks.ReadWrite
      - Tasks.ReadWrite.Shared
      - User.Read
-7. Click "Grant admin consent" for these permissions (org tenants only — see note below)
+7. Click "Grant admin consent" for these permissions (org tenants only; see note below)
 
 > Migrating an existing "Web" platform registration? Add a "Mobile and desktop applications"
-> platform alongside it (or switch to it) — a client secret is no longer read or required.
+> platform alongside it (or switch to it). A client secret is no longer read or required.
 
 ### Option B: Azure CLI
 
@@ -103,7 +112,7 @@ echo "CLIENT_ID=$APP_ID"
 
 # 2. Add the required Microsoft Graph delegated permissions.
 #    (Microsoft Graph's resource appId, 00000003-0000-0000-c000-000000000000, and the
-#    scope GUIDs below are fixed platform values — the same for every tenant/app.)
+#    scope GUIDs below are fixed platform values, the same for every tenant/app.)
 az ad app permission add --id "$APP_ID" \
   --api 00000003-0000-0000-c000-000000000000 \
   --api-permissions \
@@ -114,17 +123,17 @@ az ad app permission add --id "$APP_ID" \
     c5ddf11b-c114-4886-8558-8a4e557cd52b=Scope
 # (User.Read, Tasks.Read, Tasks.ReadWrite, Tasks.Read.Shared, Tasks.ReadWrite.Shared, respectively)
 
-# 3. Grant admin consent — only applicable/needed for AzureADMyOrg / AzureADMultipleOrgs
+# 3. Grant admin consent. Only applicable/needed for AzureADMyOrg / AzureADMultipleOrgs
 #    audiences, and only if you're a tenant admin. For AzureADandPersonalMicrosoftAccount
 #    or PersonalMicrosoftAccount audiences, personal-account users consent themselves the
-#    first time they sign in (during `pnpm run auth`) — skip this step for those.
+#    first time they sign in (during `pnpm run auth`); skip this step for those.
 az ad app permission admin-consent --id "$APP_ID"
 ```
 
 ### Option C: Microsoft Graph API directly
 
 Equivalent to Option B, via a raw Graph call (e.g. through `az rest`, `curl` with a bearer
-token, or Graph Explorer) — useful if you're not using the Azure CLI:
+token, or Graph Explorer), useful if you're not using the Azure CLI:
 
 ```bash
 az rest --method POST \
@@ -187,6 +196,48 @@ TENANT_ID=common
 TENANT_ID=00000000-0000-0000-0000-000000000000
 ```
 
+### Access Modes
+
+Authentication grants this server your full `Tasks.ReadWrite` scope, so by default an
+assistant can delete lists and tasks as easily as it can read them. `MSTODO_ACCESS_MODE`
+narrows the tool surface:
+
+| Mode    | Tools | What the assistant can do                                                    |
+| ------- | ----- | ---------------------------------------------------------------------------- |
+| `read`  | 10    | Query lists, tasks, checklists, search and agenda. Changes nothing.          |
+| `write` | 17    | Everything in `read`, plus create and update. Cannot delete.                 |
+| `full`  | 21    | Everything, including `delete-*` and `archive-completed-tasks`. **Default.** |
+
+Set it in the MCP server config alongside the command:
+
+```json
+{
+  "mcpServers": {
+    "microsoftTodo": {
+      "command": "npx",
+      "args": ["--yes", "microsoft-todo-mcp-server"],
+      "env": { "MSTODO_ACCESS_MODE": "write" }
+    }
+  }
+}
+```
+
+Withheld tools are never registered, so they don't appear in `tools/list` at all. The
+assistant can't attempt them and be refused, it simply doesn't know they exist. Run
+`auth-status` to see the active mode and exactly which tools are being withheld.
+
+Notes:
+
+- Unset means `full`, so upgrading an existing install doesn't silently lose tools.
+- An unrecognised value is fatal at startup rather than falling back: a typo like
+  `MSTODO_ACCESS_MODE=raed` must not quietly grant full control.
+- `archive-completed-tasks` counts as destructive: it deletes from the source list after
+  copying, so it needs `full` even though it's framed as a move.
+- Aliases are accepted: `read-only` → `read`, `read-write`/`update` → `write`, `all` → `full`.
+- This is a guard rail against accidents, not a security boundary. The token in the
+  encrypted cache still carries full scope, and anything that can edit the MCP config can
+  change the mode.
+
 ### Token Storage
 
 Authentication tokens are never written into this project directory (which matters if it's
@@ -197,7 +248,7 @@ rest** in a per-user, per-machine location:
 - **macOS/Linux**: `~/.config/microsoft-todo-mcp/token-cache.bin`
 
 The encryption key is derived from a machine identifier, so the file is only usable on the
-machine that created it — copying it to another machine (e.g. via cloud sync) yields
+machine that created it. Copying it to another machine (e.g. via cloud sync) yields
 undecryptable bytes, not a portable credential. Refresh happens silently and automatically;
 there's nothing to configure. You can override the cache file location:
 
@@ -206,7 +257,25 @@ export MSTODO_TOKEN_FILE=/path/to/custom/token-cache.bin
 ```
 
 Because credentials aren't portable between machines, run `pnpm run auth` once on each
-machine you use this server from.
+machine you use this server from, or deploy the [cloud connector](#cloud-connector-azure-container-apps)
+once and skip per-machine sign-in entirely.
+
+### Cloud Connector (Azure Container Apps)
+
+As an opt-in alternative to the local install, the same tool set can run as a single
+deployment on Azure Container Apps, reachable from any machine over Streamable HTTP:
+
+- `dist/http-server.js` serves MCP at `/mcp` behind a static bearer token
+  (`MSTODO_BEARER_TOKEN`), with an unauthenticated `GET /health` for platform probes.
+- The encrypted token cache lives in a Key Vault secret (`MSTODO_TOKEN_STORE=key-vault`),
+  encrypted with a fixed `MSTODO_ENCRYPTION_KEY` instead of the machine ID.
+- You sign in locally once, then `pnpm run seed-cloud-token` re-encrypts that cache for
+  upload. The server refreshes tokens silently and writes them back to Key Vault.
+- Claude Code connects directly over HTTP. Claude Desktop connects through
+  `dist/local-proxy.js`, a small stdio-to-HTTP relay.
+
+See **[docs/CLOUD_CONNECTOR.md](docs/CLOUD_CONNECTOR.md)** for the full deployment walkthrough,
+environment variables, client configuration, and limitations.
 
 ## Usage
 
@@ -215,18 +284,19 @@ machine you use this server from.
 #### Step 1: Authenticate with Microsoft
 
 ```bash
-# If installed globally
-git clone https://github.com/jordanburke/microsoft-todo-mcp-server.git
-cd microsoft-todo-mcp-server
-pnpm install
+# In a git checkout
 pnpm run auth
 
-# Or if running locally
-pnpm run auth
+# Installed globally
+mstodo-auth
 ```
 
 This opens a browser window for Microsoft authentication and stores your session in the
-encrypted per-machine token cache described above.
+encrypted per-machine token cache described above. It's one-shot: it exits once you've
+signed in, and binds no port of its own (MSAL's loopback callback listens on 127.0.0.1
+only). Run it once on every machine, since the cache can't be copied between them.
+
+`mstodo-setup` runs this step for you as part of the guided flow, so use one or the other.
 
 #### Step 2: Create MCP Configuration
 
@@ -236,11 +306,14 @@ pnpm run create-config
 
 # Or use the global helper (if installed globally)
 mstodo-config
+
+# Optionally pick an output path and access mode (see Access Modes above)
+mstodo-config ./mcp.json write
 ```
 
-This creates an `mcp.json` file. No tokens are embedded in it — the server reads its own
+This creates an `mcp.json` file. No tokens are embedded in it; the server reads its own
 encrypted per-machine token store automatically, so `pnpm run auth` must be run once on
-each machine you deploy this to.
+each machine you deploy this to. `mstodo-setup` asks for the access mode interactively.
 
 #### Step 3: Configure Your AI Assistant
 
@@ -258,13 +331,14 @@ Add to your configuration file:
     "microsoftTodo": {
       "command": "npx",
       "args": ["--yes", "microsoft-todo-mcp-server"],
-      "env": {}
+      "env": { "MSTODO_ACCESS_MODE": "full" }
     }
   }
 }
 ```
 
-No tokens go in this config — run `pnpm run auth` once on this machine first.
+No tokens go in this config. Run `pnpm run auth` once on this machine first. Change
+`MSTODO_ACCESS_MODE` to `read` or `write` to narrow what the assistant can do.
 
 **For Cursor:**
 
@@ -289,6 +363,10 @@ npx microsoft-todo-mcp-server  # Run globally installed version
 pnpm run auth         # Run interactive PKCE sign-in (opens browser)
 pnpm run create-config # Generate mcp.json (no tokens embedded)
 
+# Cloud Connector (see docs/CLOUD_CONNECTOR.md)
+pnpm run cloud-server     # Run the HTTP server (needs MSTODO_BEARER_TOKEN etc.)
+pnpm run seed-cloud-token # Re-encrypt the local token cache for upload to Key Vault
+
 # Code Quality
 pnpm run format       # Format code with Prettier
 pnpm run format:check # Check code formatting
@@ -298,62 +376,93 @@ pnpm run typecheck    # TypeScript type checking
 
 ## MCP Tools
 
-The server provides 19 tools for comprehensive Microsoft To Do and Planner management:
+The server provides 21 tools for comprehensive Microsoft To Do and Planner management. The
+badge after each tool is the [access mode](#access-modes) it requires: 🟢 `read`,
+🟡 `write`, 🔴 `full`.
 
 ### Authentication
 
-- **`auth-status`** - Check authentication status, token expiration, and account type
+- **`auth-status`** 🟢 - Check authentication status, token expiration, account type, and the active access mode
 
 ### Task Lists (Top-level Containers)
 
-- **`get-task-lists`** - Retrieve all task lists with metadata (default, shared, etc.)
-- **`create-task-list`** - Create a new task list
-- **`update-task-list`** - Rename an existing task list
-- **`delete-task-list`** - Delete a task list and all its contents
+- **`get-task-lists`** 🟢 - Retrieve all task lists with metadata (default, shared, etc.)
+- **`get-task-lists-organized`** 🟢 - Group lists into folders inferred from naming patterns, emoji prefixes, and sharing status
+- **`create-task-list`** 🟡 - Create a new task list
+- **`update-task-list`** 🟡 - Rename an existing task list
+- **`delete-task-list`** 🔴 - Delete a task list and all its contents
 
 ### Tasks (Main Todo Items)
 
-- **`get-tasks`** - Get tasks from a list with filtering, sorting, and pagination
+- **`get-tasks`** 🟢 - Get tasks from a list with filtering, sorting, and pagination
   - Supports OData query parameters: `$filter`, `$select`, `$orderby`, `$top`, `$skip`, `$count`
-- **`create-task`** - Create a new task with full property support
+- **`create-task`** 🟡 - Create a new task with full property support
   - Title, description, due date, start date, importance, reminders, status, categories
-- **`update-task`** - Update any task properties
-- **`delete-task`** - Delete a task and all its checklist items
+- **`update-task`** 🟡 - Update any task properties
+- **`delete-task`** 🔴 - Delete a task and all its checklist items
+
+### Cross-List Views
+
+Graph scopes every task query to a single list, so these two fan out across your lists and
+combine the results, so no `listId` is needed. Both accept list IDs _or_ list names in
+`listIds`, and both report any lists that couldn't be read so an empty result is never
+mistaken for "nothing there".
+
+- **`search-tasks`** 🟢 - Find tasks by text across every list at once
+  - Matches title and categories (and descriptions with `searchBody`), case-insensitively
+  - All whitespace-separated terms must appear, in any order: `tax invoice` finds "Invoice for tax return"
+  - Filters: `importance`, `dueBefore`/`dueAfter`, `includeCompleted`, `limit`
+- **`get-agenda`** 🟢 - Roll everything due into overdue / today / tomorrow / upcoming sections
+  - `days` sets how far ahead to look (default 7); overdue is never windowed out
+  - `timeZone` (IANA name) decides which day is "today", defaulting to `MSTODO_TIMEZONE` then the server's local zone
+  - Due dates are read as the calendar day To Do stored, not converted from the instant, so a task due Aug 5 doesn't show as Aug 4 in a negative-offset zone
 
 ### Checklist Items (Subtasks)
 
-- **`get-checklist-items`** - Get subtasks for a specific task
-- **`create-checklist-item`** - Add a new subtask to a task
-- **`update-checklist-item`** - Update subtask text or completion status
-- **`delete-checklist-item`** - Remove a specific subtask
+- **`get-checklist-items`** 🟢 - Get subtasks for a specific task
+- **`create-checklist-item`** 🟡 - Add a new subtask to a task
+- **`update-checklist-item`** 🟡 - Update subtask text or completion status
+- **`delete-checklist-item`** 🔴 - Remove a specific subtask
+
+### Maintenance
+
+- **`archive-completed-tasks`** 🔴 - Move completed tasks older than N days into an archive list (copies, then deletes from the source; supports `dryRun`)
+- **`test-graph-api-exploration`** 🟢 - Probe Graph for undocumented folder/grouping properties
 
 ### Microsoft Planner
 
-Powers the "Assigned to me" view in the To Do app — a separate API from native To Do
+Powers the "Assigned to me" view in the To Do app, a separate API from native To Do
 lists, covering tasks from Planner plans (e.g. project boards) you're assigned to. Uses
 the same `Tasks.Read`/`Tasks.ReadWrite` scopes already granted; no extra consent needed.
 
-- **`get-assigned-planner-tasks`** - Get Planner tasks assigned to you across all plans
-- **`get-planner-task-details`** - Get the description and checklist for a specific Planner task
-- **`update-planner-task`** - Update progress, title, priority, or dates on a Planner task (handles Planner's required ETag concurrency check automatically)
+- **`get-assigned-planner-tasks`** 🟢 - Get Planner tasks assigned to you across all plans
+- **`get-planner-task-details`** 🟢 - Get the description and checklist for a specific Planner task
+- **`update-planner-task`** 🟡 - Update progress, title, priority, or dates on a Planner task (handles Planner's required ETag concurrency check automatically)
 
 ## Architecture
 
 ### Project Structure
 
 - **MCP Server** (`src/todo-index.ts`) - Core server implementing the MCP protocol
+- **Access Modes** (`src/access-mode.ts`) - Parses `MSTODO_ACCESS_MODE` and decides which tools get registered
+- **Cross-List Helpers** (`src/agenda.ts`) - Due-date bucketing, query matching, and the fan-out concurrency cap
 - **CLI Wrapper** (`src/cli.ts`) - Executable entry point
 - **Auth Flow** (`src/auth-server.ts`) - One-shot interactive PKCE sign-in via MSAL Node
 - **MSAL Client** (`src/msal-client.ts`) - Shared `PublicClientApplication` factory and encrypted cache plugin
 - **Token Manager** (`src/token-manager.ts`) - Silent token acquisition against the encrypted cache
 - **Crypto Store** (`src/crypto-store.ts`) - AES-256-GCM encryption of the token cache, machine-bound key
 - **Config Generator** (`src/create-mcp-config.ts`) - Helper to create MCP configurations
+- **HTTP Server** (`src/http-server.ts`) - Cloud connector entry point: Streamable HTTP at `/mcp`, bearer-token gated
+- **Token Store** (`src/token-store.ts`) - Local-file or Key Vault backing for the encrypted token cache
+- **Cloud Seeder** (`src/seed-cloud-token.ts`) - Re-encrypts a local token cache with the server's key
+- **Local Proxy** (`src/local-proxy.ts`) - stdio ↔ HTTP relay so Claude Desktop can reach the cloud connector
 
 ### Technical Details
 
-- **Microsoft Graph API**: Uses v1.0 endpoints
+- **Microsoft Graph API**: Uses v1.0 endpoints, with bounded-concurrency fan-out and Retry-After-aware retries on 429/503 throttling
 - **Authentication**: MSAL Node `PublicClientApplication`, authorization code flow with PKCE (no client secret)
-- **Token Storage**: Encrypted at rest, machine-bound, stored outside the project directory; automatic silent refresh
+- **Token Storage**: Encrypted at rest, machine-bound, stored outside the project directory; automatic silent refresh. The cloud connector instead uses a fixed key and a Key Vault secret
+- **Transports**: stdio (`dist/cli.js`, default) and Streamable HTTP (`dist/http-server.js`, cloud connector)
 - **Build System**: ts-builds (tsdown) for fast TypeScript compilation
 - **Module System**: ESM (ECMAScript modules)
 
@@ -379,7 +488,7 @@ the same `Tasks.Read`/`Tasks.ReadWrite` scopes already granted; no extra consent
 
 - Verify `CLIENT_ID` and `TENANT_ID` in your `.env` file
 - Ensure the Azure app registration has a "Mobile and desktop applications" platform with
-  `http://localhost` as a redirect URI (not a "Web" platform — that expects a client secret)
+  `http://localhost` as a redirect URI (not a "Web" platform, which expects a client secret)
 - Check Azure App permissions are granted with admin consent
 
 **Permission issues**
@@ -413,7 +522,7 @@ TENANT_ID=consumers  # Personal only
 ```
 
 The token cache is encrypted at rest and machine-bound, so it can't be inspected directly
-with `cat`/`jq` — use the `auth-status` MCP tool, or re-run `pnpm run auth` if in doubt.
+with `cat`/`jq`. Use the `auth-status` MCP tool, or re-run `pnpm run auth` if in doubt.
 
 **Enable verbose logging:**
 

@@ -4,7 +4,7 @@ import { existsSync, mkdirSync } from "fs"
 import { homedir } from "os"
 import { join } from "path"
 
-import { readEncryptedFile, writeEncryptedFile } from "./crypto-store.js"
+import { resolveTokenStore, type TokenStore } from "./token-store.js"
 
 export const scopes = [
   "offline_access", // keep first so it isn't dropped from consent
@@ -17,11 +17,16 @@ export const scopes = [
   "User.Read",
 ]
 
+/** The per-user config directory path, without touching the filesystem. */
+export function getConfigDirPath(): string {
+  return process.platform === "win32"
+    ? join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "microsoft-todo-mcp")
+    : join(homedir(), ".config", "microsoft-todo-mcp")
+}
+
+/** As above, but creates the directory — use this before writing into it. */
 export function getConfigDir(): string {
-  const configDir =
-    process.platform === "win32"
-      ? join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "microsoft-todo-mcp")
-      : join(homedir(), ".config", "microsoft-todo-mcp")
+  const configDir = getConfigDirPath()
 
   if (!existsSync(configDir)) {
     mkdirSync(configDir, { recursive: true })
@@ -34,17 +39,17 @@ export function getCacheFilePath(): string {
   return process.env.MSTODO_TOKEN_FILE || join(getConfigDir(), "token-cache.bin")
 }
 
-function createCachePlugin(cacheFilePath: string): ICachePlugin {
+function createCachePlugin(store: TokenStore): ICachePlugin {
   return {
     beforeCacheAccess: async (cacheContext) => {
-      const data = readEncryptedFile(cacheFilePath)
+      const data = await store.read()
       if (data) {
         cacheContext.tokenCache.deserialize(data)
       }
     },
     afterCacheAccess: async (cacheContext) => {
       if (cacheContext.cacheHasChanged) {
-        writeEncryptedFile(cacheFilePath, cacheContext.tokenCache.serialize())
+        await store.write(cacheContext.tokenCache.serialize())
       }
     },
   }
@@ -66,7 +71,7 @@ export function createPublicClientApplication(): PublicClientApplication {
       authority: `https://login.microsoftonline.com/${getTenantId()}`,
     },
     cache: {
-      cachePlugin: createCachePlugin(getCacheFilePath()),
+      cachePlugin: createCachePlugin(resolveTokenStore(getCacheFilePath())),
     },
     system: {
       loggerOptions: {
