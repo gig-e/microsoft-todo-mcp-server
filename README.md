@@ -257,7 +257,25 @@ export MSTODO_TOKEN_FILE=/path/to/custom/token-cache.bin
 ```
 
 Because credentials aren't portable between machines, run `pnpm run auth` once on each
-machine you use this server from.
+machine you use this server from — or deploy the [cloud connector](#cloud-connector-azure-container-apps)
+once and skip per-machine sign-in entirely.
+
+### Cloud Connector (Azure Container Apps)
+
+As an opt-in alternative to the local install, the same tool set can run as a single
+deployment on Azure Container Apps, reachable from any machine over Streamable HTTP:
+
+- `dist/http-server.js` serves MCP at `/mcp` behind a static bearer token
+  (`MSTODO_BEARER_TOKEN`), with an unauthenticated `GET /health` for platform probes.
+- The encrypted token cache lives in a Key Vault secret (`MSTODO_TOKEN_STORE=key-vault`),
+  encrypted with a fixed `MSTODO_ENCRYPTION_KEY` instead of the machine ID.
+- You sign in locally once, then `pnpm run seed-cloud-token` re-encrypts that cache for
+  upload. The server refreshes tokens silently and writes them back to Key Vault.
+- Claude Code connects directly over HTTP. Claude Desktop connects through
+  `dist/local-proxy.js`, a small stdio-to-HTTP relay.
+
+See **[docs/CLOUD_CONNECTOR.md](docs/CLOUD_CONNECTOR.md)** for the full deployment walkthrough,
+environment variables, client configuration, and limitations.
 
 ## Usage
 
@@ -345,6 +363,10 @@ npx microsoft-todo-mcp-server  # Run globally installed version
 pnpm run auth         # Run interactive PKCE sign-in (opens browser)
 pnpm run create-config # Generate mcp.json (no tokens embedded)
 
+# Cloud Connector (see docs/CLOUD_CONNECTOR.md)
+pnpm run cloud-server     # Run the HTTP server (needs MSTODO_BEARER_TOKEN etc.)
+pnpm run seed-cloud-token # Re-encrypt the local token cache for upload to Key Vault
+
 # Code Quality
 pnpm run format       # Format code with Prettier
 pnpm run format:check # Check code formatting
@@ -430,12 +452,17 @@ the same `Tasks.Read`/`Tasks.ReadWrite` scopes already granted; no extra consent
 - **Token Manager** (`src/token-manager.ts`) - Silent token acquisition against the encrypted cache
 - **Crypto Store** (`src/crypto-store.ts`) - AES-256-GCM encryption of the token cache, machine-bound key
 - **Config Generator** (`src/create-mcp-config.ts`) - Helper to create MCP configurations
+- **HTTP Server** (`src/http-server.ts`) - Cloud connector entry point: Streamable HTTP at `/mcp`, bearer-token gated
+- **Token Store** (`src/token-store.ts`) - Local-file or Key Vault backing for the encrypted token cache
+- **Cloud Seeder** (`src/seed-cloud-token.ts`) - Re-encrypts a local token cache with the server's key
+- **Local Proxy** (`src/local-proxy.ts`) - stdio ↔ HTTP relay so Claude Desktop can reach the cloud connector
 
 ### Technical Details
 
 - **Microsoft Graph API**: Uses v1.0 endpoints, with bounded-concurrency fan-out and Retry-After-aware retries on 429/503 throttling
 - **Authentication**: MSAL Node `PublicClientApplication`, authorization code flow with PKCE (no client secret)
-- **Token Storage**: Encrypted at rest, machine-bound, stored outside the project directory; automatic silent refresh
+- **Token Storage**: Encrypted at rest, machine-bound, stored outside the project directory; automatic silent refresh. The cloud connector instead uses a fixed key and a Key Vault secret
+- **Transports**: stdio (`dist/cli.js`, default) and Streamable HTTP (`dist/http-server.js`, cloud connector)
 - **Build System**: ts-builds (tsdown) for fast TypeScript compilation
 - **Module System**: ESM (ECMAScript modules)
 
