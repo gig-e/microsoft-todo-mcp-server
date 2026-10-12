@@ -245,3 +245,83 @@ The bearer token sits in plain text in this config file. Treat the file accordin
   from the remote server there.
 - **Probe failures**: query `ContainerAppSystemLogs_CL` in the environment's Log Analytics
   workspace for `Probe of ... failed`.
+
+## Reference deployment (decommissioned 2026-10-12)
+
+The connector ran in production from late September to 2026-10-12. Claude Desktop then
+moved back to the local stdio server, and the resource group was deleted. It cost about
+$5/month, almost all of it the Basic container registry's flat daily fee; the Container
+App scaled to zero and stayed inside the free grant. This section records what was actually
+deployed so it can be rebuilt as it was. Secret values are not recorded here.
+
+| Setting                      | Value                                                           |
+| ---------------------------- | --------------------------------------------------------------- |
+| Region                       | East US 2 (`eastus2`)                                           |
+| Resource group               | `rg-todomcp-prod`                                               |
+| Container Apps environment   | `cae-todomcp-prod` (Consumption workload profile)               |
+| Container App                | `ca-todomcp-prod`, 0.5 vCPU / 1 GiB, min 0 / max 1 replicas     |
+| Ingress                      | external, target port 8080, transport auto                      |
+| Container registry           | `crtodomcpprodtl` (Basic), image `todomcp:latest`               |
+| Registry auth                | system-assigned managed identity with `AcrPull` on the registry |
+| Key Vault                    | `kv-todomcp-prod`, RBAC authorization, soft delete 90 days      |
+| Key Vault role               | app identity has _Key Vault Secrets Officer_ on the vault       |
+| Token cache secret           | `TokenCache` (`MSTODO_TOKEN_SECRET_NAME`)                       |
+| Other vault secrets (backup) | `BearerToken`, `EncryptionKey`                                  |
+| App secrets                  | `bearer-token`, `encryption-key` (referenced via `secretref:`)  |
+| Log Analytics workspace      | auto-created by `az containerapp env create`                    |
+| `CLIENT_ID` / `TENANT_ID`    | same values as the local checkout's `.env`                      |
+| `MSTODO_ACCESS_MODE`         | `full`                                                          |
+
+The Entra app registration was **not** part of the resource group and still exists; the local
+server uses the same `CLIENT_ID`, so copy both IDs from `.env` into step 6.
+
+Probes as deployed (the startup probe is tighter than the step 7 example):
+
+```yaml
+probes:
+  - type: Startup
+    httpGet: { path: /health, port: 8080 }
+    initialDelaySeconds: 2
+    periodSeconds: 3
+    timeoutSeconds: 3
+    failureThreshold: 20
+  - type: Readiness
+    httpGet: { path: /health, port: 8080 }
+    periodSeconds: 10
+    timeoutSeconds: 3
+  - type: Liveness
+    httpGet: { path: /health, port: 8080 }
+    periodSeconds: 30
+    timeoutSeconds: 3
+```
+
+### Rebuilding it
+
+Follow steps 1–8 above with these names. The only difference from step 4 is that this deployment
+used a named registry pulled via managed identity rather than the one `az containerapp up --source`
+creates:
+
+```bash
+az group create -n rg-todomcp-prod -l eastus2
+az acr create -n crtodomcpprodtl -g rg-todomcp-prod --sku Basic
+az acr build -r crtodomcpprodtl -t todomcp:latest .
+az containerapp env create -n cae-todomcp-prod -g rg-todomcp-prod -l eastus2
+az containerapp create -n ca-todomcp-prod -g rg-todomcp-prod --environment cae-todomcp-prod \
+  --image crtodomcpprodtl.azurecr.io/todomcp:latest \
+  --registry-server crtodomcpprodtl.azurecr.io --registry-identity system \
+  --system-assigned --ingress external --target-port 8080 \
+  --cpu 0.5 --memory 1Gi --min-replicas 0 --max-replicas 1
+```
+
+`--registry-identity system` assigns the identity and grants `AcrPull` for you. Then continue at
+step 5 (Key Vault role), step 6 (secrets and env vars) and step 7 (probes).
+
+Key Vault notes for a rebuild:
+
+- **Within 90 days of 2026-10-12** the vault is soft-deleted, not gone, and its name is reserved.
+  Recover it with `az keyvault recover -n kv-todomcp-prod` (after `az group create`, since recovery needs
+  the original resource group to exist). That restores `BearerToken` and `EncryptionKey` too, so the
+  old secrets can be reused. Re-seed `TokenCache` anyway (steps 2–3), because the old refresh
+  token has likely gone stale.
+- **After 90 days** the name frees up; create the vault fresh and generate new secrets (step 1).
+- To reuse the name sooner without recovering, purge it: `az keyvault purge -n kv-todomcp-prod`.
